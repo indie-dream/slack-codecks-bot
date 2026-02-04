@@ -5,5 +5,5 @@
   "defaultPriority": "b",
   "confirmationEmoji": "white_check_mark",
   "errorEmoji": "warning",
-  "sendSummaryReply": false
+  "sendSummaryReply": true
 }
