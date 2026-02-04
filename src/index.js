@@ -11,7 +11,7 @@ const { parseTaskMessage } = require('./parser');
 const { CodecksClient } = require('./codecks');
 const configFile = require('../config.json');
 
-// Łączymy config.json z environment variables (ENV ma priorytet)
+// Merge config: environment variables override config.json
 const config = {
     ...configFile,
     defaultDeckId: process.env.DEFAULT_DECK_ID || configFile.defaultDeckId,
@@ -26,7 +26,7 @@ const config = {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Slack Web Client (do wysyłania reakcji/wiadomości)
+// Slack Web Client
 const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN);
 
 // Codecks Client
@@ -35,24 +35,26 @@ const codecksClient = new CodecksClient(
     process.env.CODECKS_SUBDOMAIN
 );
 
-// Set do deduplikacji eventów (Slack może wysyłać retry)
+// Deduplikacja eventów
 const processedEvents = new Set();
 
-// Middleware do weryfikacji podpisu Slack
+// Middleware do weryfikacji Slack
 app.use('/slack/events', express.raw({ type: 'application/json' }));
 
+// JSON middleware dla innych endpointów
+app.use(express.json());
+
 /**
- * Weryfikuje podpis requestu od Slack
+ * Weryfikuje podpis Slack
  */
 function verifySlackSignature(req) {
     const timestamp = req.headers['x-slack-request-timestamp'];
     const signature = req.headers['x-slack-signature'];
     
-    // Ochrona przed replay attacks (request starszy niż 5 min)
+    if (!timestamp || !signature) return false;
+    
     const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 60 * 5;
-    if (timestamp < fiveMinutesAgo) {
-        return false;
-    }
+    if (timestamp < fiveMinutesAgo) return false;
     
     const sigBasestring = `v0:${timestamp}:${req.body}`;
     const mySignature = 'v0=' + crypto
@@ -60,17 +62,20 @@ function verifySlackSignature(req) {
         .update(sigBasestring)
         .digest('hex');
     
-    return crypto.timingSafeEqual(
-        Buffer.from(mySignature),
-        Buffer.from(signature)
-    );
+    try {
+        return crypto.timingSafeEqual(
+            Buffer.from(mySignature),
+            Buffer.from(signature)
+        );
+    } catch {
+        return false;
+    }
 }
 
 /**
- * Główny endpoint dla Slack Events API
+ * Główny endpoint Slack Events API
  */
 app.post('/slack/events', async (req, res) => {
-    // Weryfikacja podpisu
     if (!verifySlackSignature(req)) {
         console.error('❌ Nieprawidłowy podpis Slack');
         return res.status(401).send('Unauthorized');
@@ -78,16 +83,15 @@ app.post('/slack/events', async (req, res) => {
     
     const payload = JSON.parse(req.body);
     
-    // URL Verification Challenge (jednorazowo przy konfiguracji)
+    // URL Verification
     if (payload.type === 'url_verification') {
-        console.log('✅ URL Verification challenge');
+        console.log('✅ URL Verification OK');
         return res.json({ challenge: payload.challenge });
     }
     
-    // Natychmiast odpowiadamy 200 OK (Slack wymaga odpowiedzi w 3s)
+    // Odpowiadamy natychmiast
     res.status(200).send('OK');
     
-    // Przetwarzanie eventu asynchronicznie
     if (payload.type === 'event_callback') {
         await handleEvent(payload.event);
     }
@@ -97,23 +101,21 @@ app.post('/slack/events', async (req, res) => {
  * Obsługa eventu wiadomości
  */
 async function handleEvent(event) {
-    // Filtrujemy tylko wiadomości (nie edycje, nie boty)
+    // Tylko wiadomości (nie boty, nie edycje)
     if (event.type !== 'message' || event.subtype || event.bot_id) {
         return;
     }
     
-    // Deduplikacja (event_id + timestamp jako klucz)
+    // Deduplikacja
     const eventKey = `${event.client_msg_id || event.ts}`;
     if (processedEvents.has(eventKey)) {
-        console.log('⏭️ Event już przetworzony:', eventKey);
+        console.log('⏭️ Event już przetworzony');
         return;
     }
     processedEvents.add(eventKey);
-    
-    // Czyszczenie starych eventów (po 10 minutach)
     setTimeout(() => processedEvents.delete(eventKey), 10 * 60 * 1000);
     
-    // Sprawdzenie czy kanał jest na liście dozwolonych
+    // Filtr kanałów
     if (config.allowedChannels && config.allowedChannels.length > 0) {
         if (!config.allowedChannels.includes(event.channel)) {
             return;
@@ -122,7 +124,7 @@ async function handleEvent(event) {
     
     console.log('📨 Nowa wiadomość:', event.text);
     
-    // Parsowanie wiadomości na taski
+    // Parsowanie
     const tasks = parseTaskMessage(event.text, config.userMapping);
     
     if (tasks.length === 0) {
@@ -132,10 +134,10 @@ async function handleEvent(event) {
     
     console.log(`📋 Znaleziono ${tasks.length} task(ów)`);
     
-    // Tworzenie kart w Codecks
+    // Tworzenie kart
     const results = await createCardsInCodecks(tasks);
     
-    // Reakcja na wiadomość
+    // Reakcja
     await addReaction(event.channel, event.ts, results);
 }
 
@@ -143,10 +145,7 @@ async function handleEvent(event) {
  * Tworzy karty w Codecks
  */
 async function createCardsInCodecks(tasks) {
-    const results = {
-        success: [],
-        failed: []
-    };
+    const results = { success: [], failed: [] };
     
     for (const task of tasks) {
         try {
@@ -166,13 +165,10 @@ async function createCardsInCodecks(tasks) {
                 cardId: card.id
             });
             
-            console.log(`✅ Utworzono kartę: "${task.title}" → ${task.assigneeName || 'nieprzypisana'}`);
+            console.log(`✅ Karta: "${task.title}" → ${task.assigneeName || 'nieprzypisana'}`);
             
         } catch (error) {
-            results.failed.push({
-                title: task.title,
-                error: error.message
-            });
+            results.failed.push({ title: task.title, error: error.message });
             console.error(`❌ Błąd tworzenia karty "${task.title}":`, error.message);
         }
     }
@@ -181,7 +177,7 @@ async function createCardsInCodecks(tasks) {
 }
 
 /**
- * Dodaje reakcję emoji do wiadomości
+ * Dodaje reakcję emoji
  */
 async function addReaction(channel, timestamp, results) {
     try {
@@ -195,67 +191,188 @@ async function addReaction(channel, timestamp, results) {
             name: emoji
         });
         
-        // Opcjonalnie: odpowiedź w wątku z podsumowaniem
-        if (config.sendSummaryReply) {
-            const summaryLines = [
-                `📋 *Utworzono ${results.success.length} task(ów)*`
-            ];
-            
-            results.success.forEach(task => {
-                const assignee = task.assignee ? `👤 ${task.assignee}` : '👤 _nieprzypisany_';
-                summaryLines.push(`• ${task.title} → ${assignee}`);
-            });
-            
-            if (results.failed.length > 0) {
-                summaryLines.push(`\n⚠️ *Błędy (${results.failed.length}):*`);
-                results.failed.forEach(task => {
-                    summaryLines.push(`• ${task.title}: ${task.error}`);
-                });
-            }
-            
-            await slackClient.chat.postMessage({
-                channel: channel,
-                thread_ts: timestamp,
-                text: summaryLines.join('\n')
-            });
-        }
-        
     } catch (error) {
         console.error('Błąd dodawania reakcji:', error.message);
     }
 }
 
 /**
- * Health check endpoint
+ * 🆕 Endpoint do listowania decków z Codecks (z UUID!)
+ */
+app.get('/list-decks', async (req, res) => {
+    try {
+        console.log('📋 Pobieranie listy decków z Codecks...');
+        
+        const decks = await codecksClient.listDecks();
+        
+        // HTML response dla łatwego czytania
+        let html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Codecks Decks</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a2e; color: #eee; }
+        h1 { color: #00d9ff; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+        th, td { border: 1px solid #444; padding: 12px; text-align: left; }
+        th { background: #16213e; color: #00d9ff; }
+        tr:nth-child(even) { background: #1f1f3a; }
+        .uuid { font-family: monospace; background: #2d2d4a; padding: 4px 8px; border-radius: 4px; }
+        .copy-btn { background: #00d9ff; color: #000; border: none; padding: 6px 12px; cursor: pointer; border-radius: 4px; margin-left: 8px; }
+        .copy-btn:hover { background: #00b8d4; }
+        .info { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <h1>🎴 Codecks Decks</h1>
+    <div class="info">
+        <strong>Subdomain:</strong> ${process.env.CODECKS_SUBDOMAIN}<br>
+        <strong>Znaleziono:</strong> ${decks.length} deck(ów)
+    </div>
+    <table>
+        <tr>
+            <th>Nazwa</th>
+            <th>UUID (skopiuj do DEFAULT_DECK_ID)</th>
+            <th>Slug (z URL)</th>
+        </tr>`;
+        
+        for (const deck of decks) {
+            html += `
+        <tr>
+            <td><strong>${deck.title || deck.name || 'Bez nazwy'}</strong></td>
+            <td>
+                <span class="uuid">${deck.id}</span>
+                <button class="copy-btn" onclick="navigator.clipboard.writeText('${deck.id}')">📋 Kopiuj</button>
+            </td>
+            <td>${deck.slug || '-'}</td>
+        </tr>`;
+        }
+        
+        html += `
+    </table>
+    <br>
+    <p>👆 Skopiuj UUID decka i wklej do Render → Environment → <code>DEFAULT_DECK_ID</code></p>
+</body>
+</html>`;
+        
+        res.send(html);
+        
+    } catch (error) {
+        console.error('❌ Błąd pobierania decków:', error.message);
+        res.status(500).send(`
+            <h1>❌ Błąd</h1>
+            <p>${error.message}</p>
+            <p>Sprawdź czy CODECKS_TOKEN i CODECKS_SUBDOMAIN są poprawne w Render.</p>
+        `);
+    }
+});
+
+/**
+ * 🆕 Endpoint do listowania użytkowników z Codecks (do userMapping)
+ */
+app.get('/list-users', async (req, res) => {
+    try {
+        console.log('👥 Pobieranie listy użytkowników z Codecks...');
+        
+        const users = await codecksClient.listUsers();
+        
+        let html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Codecks Users</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a2e; color: #eee; }
+        h1 { color: #00d9ff; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+        th, td { border: 1px solid #444; padding: 12px; text-align: left; }
+        th { background: #16213e; color: #00d9ff; }
+        tr:nth-child(even) { background: #1f1f3a; }
+        .uuid { font-family: monospace; background: #2d2d4a; padding: 4px 8px; border-radius: 4px; }
+        code { background: #2d2d4a; padding: 10px; display: block; margin: 20px 0; border-radius: 4px; white-space: pre; }
+    </style>
+</head>
+<body>
+    <h1>👥 Codecks Users</h1>
+    <p>Znaleziono: ${users.length} użytkownik(ów)</p>
+    <table>
+        <tr>
+            <th>Nazwa</th>
+            <th>UUID</th>
+            <th>Email</th>
+        </tr>`;
+        
+        for (const user of users) {
+            html += `
+        <tr>
+            <td><strong>${user.displayName || user.username || 'Bez nazwy'}</strong></td>
+            <td><span class="uuid">${user.id}</span></td>
+            <td>${user.email || '-'}</td>
+        </tr>`;
+        }
+        
+        // Generuj gotowy userMapping
+        let mappingJson = {};
+        for (const user of users) {
+            const name = user.displayName || user.username;
+            if (name) {
+                mappingJson[name.toLowerCase()] = user.id;
+            }
+        }
+        
+        html += `
+    </table>
+    <h2>📋 Gotowy userMapping (do Render):</h2>
+    <code>${JSON.stringify(mappingJson, null, 2)}</code>
+    <p>Skopiuj powyższy JSON i wklej do Render → Environment → <code>USER_MAPPING</code></p>
+</body>
+</html>`;
+        
+        res.send(html);
+        
+    } catch (error) {
+        console.error('❌ Błąd pobierania użytkowników:', error.message);
+        res.status(500).send(`<h1>❌ Błąd</h1><p>${error.message}</p>`);
+    }
+});
+
+/**
+ * Health check
  */
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        version: '1.0.0'
+        defaultDeckId: config.defaultDeckId
     });
 });
 
 /**
- * Endpoint do testowania parsera (dev only)
+ * Główna strona
  */
-app.post('/test/parse', express.json(), (req, res) => {
-    const { message } = req.body;
-    const tasks = parseTaskMessage(message, config.userMapping);
-    res.json({ tasks });
+app.get('/', (req, res) => {
+    res.send(`
+        <h1>🤖 Slack-Codecks Bot</h1>
+        <ul>
+            <li><a href="/health">Health Check</a></li>
+            <li><a href="/list-decks">📋 Lista Decków (UUID)</a></li>
+            <li><a href="/list-users">👥 Lista Użytkowników</a></li>
+        </ul>
+    `);
 });
 
-// Start serwera
+// Start
 app.listen(PORT, () => {
     console.log(`
-╔══════════════════════════════════════════════════════════════╗
-║          🚀 Slack → Codecks Bot uruchomiony!                 ║
-╠══════════════════════════════════════════════════════════════╣
-║  Port:           ${PORT.toString().padEnd(42)}║
-║  Slack Events:   /slack/events                               ║
-║  Health Check:   /health                                     ║
-║  Default Deck:   ${(config.defaultDeckId || 'nie ustawiono').padEnd(42)}║
-╚══════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════╗
+║        🚀 Slack → Codecks Bot uruchomiony!               ║
+╠══════════════════════════════════════════════════════════╣
+║  Port:           ${PORT}                                        ║
+║  Slack Events:   /slack/events                           ║
+║  Health Check:   /health                                 ║
+║  Default Deck:   ${(config.defaultDeckId || 'nie ustawiono').substring(0, 36).padEnd(36)}  ║
+╚══════════════════════════════════════════════════════════╝
     `);
 });
 
