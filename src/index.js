@@ -9,7 +9,19 @@ const crypto = require('crypto');
 const { WebClient } = require('@slack/web-api');
 const { parseTaskMessage } = require('./parser');
 const { CodecksClient } = require('./codecks');
-const config = require('../config.json');
+const configFile = require('../config.json');
+
+// Łączymy config.json z environment variables (ENV ma priorytet)
+const config = {
+    ...configFile,
+    defaultDeckId: process.env.DEFAULT_DECK_ID || configFile.defaultDeckId,
+    allowedChannels: process.env.ALLOWED_CHANNELS 
+        ? process.env.ALLOWED_CHANNELS.split(',') 
+        : configFile.allowedChannels,
+    userMapping: process.env.USER_MAPPING 
+        ? JSON.parse(process.env.USER_MAPPING) 
+        : configFile.userMapping
+};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
