@@ -1,265 +1,264 @@
 /**
- * Parser wiadomości Slack
- * Wyodrębnia taski na podstawie separatora "-" i przypisań "(Imię Nazwisko)"
+ * Parser wiadomości Slack v2.0
+ * Obsługuje wielopoziomową strukturę tasków z description i checkboxami
+ * 
+ * Format:
+ * [Create]
+ * • Nazwa taska (Owner)
+ *    • Opis linijka
+ *       • [ ] Checkbox
  */
 
 /**
- * Parsuje wiadomość Slack i wyodrębnia listę tasków
+ * Parsuje wiadomość Slack i wyodrębnia taski
  * 
  * @param {string} message - Treść wiadomości
  * @param {Object} userMapping - Mapowanie imion na ID użytkowników Codecks
- * @returns {Array} Lista tasków
- * 
- * @example
- * const tasks = parseTaskMessage(
- *   "- Stwórz system walki (Janek X)\n- Napraw bug",
- *   { "janek x": "user_123" }
- * );
- * // Zwraca:
- * // [
- * //   { title: "Stwórz system walki", assigneeId: "user_123", assigneeName: "Janek X" },
- * //   { title: "Napraw bug", assigneeId: null, assigneeName: null }
- * // ]
+ * @returns {Array} Lista tasków z description i checkboxami
  */
 function parseTaskMessage(message, userMapping = {}) {
     if (!message || typeof message !== 'string') {
         return [];
     }
     
+    // Sprawdź czy wiadomość zawiera [Create]
+    if (!message.includes('[Create]')) {
+        return [];
+    }
+    
     const tasks = [];
     const lines = message.split('\n');
     
-    // Regex do wyodrębnienia przypisania osoby: (Imię Nazwisko) lub (Imię N)
+    // Regex do wykrywania bullet points (-, •, *)
+    const bulletRegex = /^(\s*)([-•*])\s+(.+)$/;
+    
+    // Regex do wyodrębnienia przypisania: (Imię) lub (Imię Nazwisko)
     const assigneeRegex = /\(([^)]+)\)\s*$/;
     
+    // Regex do wykrywania checkboxów: [ ], [x], [X]
+    const checkboxRegex = /^\[([xX\s])\]\s*(.+)$/;
+    
+    let currentTask = null;
+    let inCreateBlock = false;
+    
     for (const line of lines) {
-        const trimmedLine = line.trim();
-        
-        // Sprawdzamy czy linia zaczyna się od "-" (separator tasków)
-        if (!trimmedLine.startsWith('-')) {
+        // Sprawdź czy zaczyna się blok [Create]
+        if (line.includes('[Create]')) {
+            inCreateBlock = true;
             continue;
         }
         
-        // Usuwamy separator i białe znaki
-        let taskContent = trimmedLine.slice(1).trim();
-        
-        // Pomijamy puste taski
-        if (!taskContent) {
+        // Ignoruj linie przed [Create]
+        if (!inCreateBlock) {
             continue;
         }
         
-        // Wyodrębniamy osobę przypisaną (jeśli istnieje)
-        let assigneeId = null;
-        let assigneeName = null;
+        // Sprawdź czy to bullet point
+        const bulletMatch = line.match(bulletRegex);
         
-        const assigneeMatch = taskContent.match(assigneeRegex);
+        if (!bulletMatch) {
+            // Pusta linia lub tekst bez bullet - kontynuuj
+            continue;
+        }
         
-        if (assigneeMatch) {
-            const rawName = assigneeMatch[1].trim();
-            assigneeName = rawName;
+        const indent = bulletMatch[1].length;
+        let content = bulletMatch[3].trim();
+        
+        // Poziom 1 (brak wcięcia lub małe) = Nowy task
+        if (indent < 2) {
+            // Zapisz poprzedni task jeśli istnieje
+            if (currentTask) {
+                tasks.push(currentTask);
+            }
             
-            // Szukamy w mapowaniu (case-insensitive)
-            const normalizedName = normalizeString(rawName);
+            // Wyodrębnij assignee
+            let assigneeId = null;
+            let assigneeName = null;
             
-            for (const [key, userId] of Object.entries(userMapping)) {
-                if (normalizeString(key) === normalizedName) {
-                    assigneeId = userId;
-                    break;
+            const assigneeMatch = content.match(assigneeRegex);
+            if (assigneeMatch) {
+                assigneeName = assigneeMatch[1].trim();
+                content = content.replace(assigneeRegex, '').trim();
+                
+                // Szukaj w mapowaniu
+                const normalizedName = normalizeString(assigneeName);
+                for (const [key, userId] of Object.entries(userMapping)) {
+                    if (normalizeString(key) === normalizedName) {
+                        assigneeId = userId;
+                        break;
+                    }
                 }
             }
             
-            // Usuwamy przypisanie z tytułu
-            taskContent = taskContent.replace(assigneeRegex, '').trim();
+            currentTask = {
+                title: content,
+                assigneeId: assigneeId,
+                assigneeName: assigneeName,
+                description: [],
+                checkboxes: []
+            };
         }
-        
-        tasks.push({
-            title: taskContent,
-            assigneeId: assigneeId,
-            assigneeName: assigneeName,
-            rawLine: trimmedLine
-        });
+        // Poziom 2 (wcięcie 2-4 spacje) = Description
+        else if (indent >= 2 && indent < 6 && currentTask) {
+            // Sprawdź czy to checkbox
+            const checkboxMatch = content.match(checkboxRegex);
+            if (checkboxMatch) {
+                const isChecked = checkboxMatch[1].toLowerCase() === 'x';
+                const checkboxText = checkboxMatch[2].trim();
+                currentTask.checkboxes.push({
+                    text: checkboxText,
+                    checked: isChecked
+                });
+            } else {
+                currentTask.description.push(content);
+            }
+        }
+        // Poziom 3+ (wcięcie 6+ spacji) = Checkboxy
+        else if (indent >= 6 && currentTask) {
+            // Sprawdź czy to checkbox
+            const checkboxMatch = content.match(checkboxRegex);
+            if (checkboxMatch) {
+                const isChecked = checkboxMatch[1].toLowerCase() === 'x';
+                const checkboxText = checkboxMatch[2].trim();
+                currentTask.checkboxes.push({
+                    text: checkboxText,
+                    checked: isChecked
+                });
+            } else {
+                // Traktuj jako checkbox bez znacznika
+                currentTask.checkboxes.push({
+                    text: content,
+                    checked: false
+                });
+            }
+        }
+    }
+    
+    // Dodaj ostatni task
+    if (currentTask) {
+        tasks.push(currentTask);
     }
     
     return tasks;
 }
 
 /**
- * Normalizuje string do porównywania (lowercase, bez polskich znaków)
+ * Buduje content karty dla Codecks (tytuł + opis + checkboxy)
  * 
- * @param {string} str - String do normalizacji
- * @returns {string} Znormalizowany string
+ * @param {Object} task - Obiekt taska
+ * @returns {string} Content do wysłania do Codecks
+ */
+function buildCardContent(task) {
+    let content = task.title;
+    
+    // Dodaj description
+    if (task.description && task.description.length > 0) {
+        content += '\n\n' + task.description.join('\n');
+    }
+    
+    // Dodaj checkboxy
+    if (task.checkboxes && task.checkboxes.length > 0) {
+        content += '\n';
+        for (const checkbox of task.checkboxes) {
+            const mark = checkbox.checked ? 'x' : ' ';
+            content += `\n- [${mark}] ${checkbox.text}`;
+        }
+    }
+    
+    return content;
+}
+
+/**
+ * Normalizuje string do porównywania (lowercase, bez polskich znaków)
  */
 function normalizeString(str) {
     return str
         .toLowerCase()
         .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '') // Usuwa akcenty
+        .replace(/[\u0300-\u036f]/g, '')
         .replace(/ł/g, 'l')
         .replace(/Ł/g, 'L')
         .trim();
 }
 
 /**
- * Sprawdza czy wiadomość zawiera jakiekolwiek taski
- * 
- * @param {string} message - Treść wiadomości
- * @returns {boolean}
+ * Sprawdza czy wiadomość zawiera komendę
  */
-function hasTasksInMessage(message) {
+function isCommand(message) {
     if (!message || typeof message !== 'string') {
         return false;
     }
-    
-    const lines = message.split('\n');
-    return lines.some(line => line.trim().startsWith('-'));
+    const trimmed = message.trim().toLowerCase();
+    return trimmed === '!help' || trimmed === '!commands';
 }
 
 /**
- * Wyodrębnia tylko tytuły tasków (bez parsowania assignee)
- * 
- * @param {string} message - Treść wiadomości
- * @returns {Array<string>} Lista tytułów
+ * Zwraca odpowiedź na komendę
  */
-function extractTaskTitles(message) {
-    const tasks = parseTaskMessage(message, {});
-    return tasks.map(task => task.title);
-}
-
-/**
- * Formatuje task do wyświetlenia
- * 
- * @param {Object} task - Obiekt taska
- * @returns {string}
- */
-function formatTaskForDisplay(task) {
-    const assignee = task.assigneeName 
-        ? `→ ${task.assigneeName}` 
-        : '→ nieprzypisany';
+function getCommandResponse(message) {
+    const trimmed = message.trim().toLowerCase();
     
-    return `• ${task.title} ${assignee}`;
-}
+    if (trimmed === '!commands') {
+        return `📋 *Dostępne komendy:*
 
-/**
- * Waliduje konfigurację mapowania użytkowników
- * 
- * @param {Object} userMapping - Mapowanie do walidacji
- * @returns {Object} Wynik walidacji { valid: boolean, errors: string[] }
- */
-function validateUserMapping(userMapping) {
-    const errors = [];
-    
-    if (!userMapping || typeof userMapping !== 'object') {
-        return { valid: false, errors: ['userMapping musi być obiektem'] };
+• \`!commands\` - pokazuje tę listę
+• \`!help\` - pokazuje przykład użycia z wyjaśnieniem
+
+📝 *Atrybuty tasków:*
+• \`[Create]\` - tworzy taski w Codecks`;
     }
     
-    for (const [name, userId] of Object.entries(userMapping)) {
-        if (typeof name !== 'string' || name.trim() === '') {
-            errors.push(`Nieprawidłowa nazwa użytkownika: "${name}"`);
-        }
-        if (typeof userId !== 'string' || userId.trim() === '') {
-            errors.push(`Nieprawidłowy userId dla "${name}"`);
-        }
+    if (trimmed === '!help') {
+        return `🤖 *Jak używać Codecks Bot:*
+
+*Tworzenie tasków:*
+\`\`\`
+[Create]
+• Nazwa taska (Owner)
+   • Opis linijka 1
+   • Opis linijka 2
+      • [ ] Checkbox do zrobienia
+      • [x] Checkbox już zrobiony
+\`\`\`
+
+*Struktura:*
+• *Poziom 1* (bez wcięcia) → Nazwa taska + opcjonalnie (Właściciel)
+• *Poziom 2* (wcięcie) → Opis taska
+• *Poziom 3* (podwójne wcięcie) → Checkboxy
+
+*Przykład:*
+\`\`\`
+[Create]
+• Stwórz system walki (Tobiasz)
+   • System ma obsługiwać multiplayer
+   • Dodaj animacje
+      • [ ] Idle animation
+      • [ ] Attack animation
+• Napraw bug z kolizjami (Anna)
+   • Gracz przechodzi przez ściany
+\`\`\`
+
+*Wskazówki:*
+• Możesz użyć \`-\`, \`•\` lub \`*\` jako bullet point
+• Owner w nawiasie jest opcjonalny
+• Checkboxy: \`[ ]\` = niezaznaczony, \`[x]\` = zaznaczony`;
     }
     
-    return {
-        valid: errors.length === 0,
-        errors
-    };
+    return null;
 }
-
-// === TESTY ===
 
 /**
- * Uruchamia testy parsera (do celów debugowania)
+ * Sprawdza czy wiadomość zawiera [Create]
  */
-function runParserTests() {
-    console.log('🧪 Uruchamianie testów parsera...\n');
-    
-    const userMapping = {
-        'janek x': 'user_001',
-        'janek': 'user_001',
-        'paweł m': 'user_002',
-        'pawel m': 'user_002',
-        'anna kowalska': 'user_003'
-    };
-    
-    const testCases = [
-        {
-            name: 'Podstawowy task z osobą',
-            input: '- Stwórz system walki (Janek X)',
-            expected: 1
-        },
-        {
-            name: 'Task bez osoby',
-            input: '- Napraw bug z kolizjami',
-            expected: 1
-        },
-        {
-            name: 'Wiele tasków',
-            input: `- Task 1 (Janek X)
-- Task 2 (Paweł M)
-- Task 3`,
-            expected: 3
-        },
-        {
-            name: 'Linie bez separatora (ignorowane)',
-            input: `To jest komentarz
-- To jest task
-Kolejny komentarz`,
-            expected: 1
-        },
-        {
-            name: 'Pusta wiadomość',
-            input: '',
-            expected: 0
-        },
-        {
-            name: 'Polskie znaki w nazwisku',
-            input: '- Przygotuj assets (Paweł M)',
-            expected: 1
-        },
-        {
-            name: 'Nieznany użytkownik',
-            input: '- Task (Nieznany User)',
-            expected: 1
-        }
-    ];
-    
-    let passed = 0;
-    let failed = 0;
-    
-    for (const test of testCases) {
-        const result = parseTaskMessage(test.input, userMapping);
-        const success = result.length === test.expected;
-        
-        if (success) {
-            console.log(`✅ ${test.name}`);
-            passed++;
-        } else {
-            console.log(`❌ ${test.name}`);
-            console.log(`   Oczekiwano: ${test.expected}, Otrzymano: ${result.length}`);
-            console.log(`   Wynik:`, result);
-            failed++;
-        }
-    }
-    
-    console.log(`\n📊 Wyniki: ${passed}/${passed + failed} testów zaliczonych`);
-    
-    return { passed, failed };
+function hasCreateCommand(message) {
+    return message && message.includes('[Create]');
 }
 
-// Eksport funkcji
 module.exports = {
     parseTaskMessage,
-    hasTasksInMessage,
-    extractTaskTitles,
-    formatTaskForDisplay,
-    validateUserMapping,
+    buildCardContent,
     normalizeString,
-    runParserTests
+    isCommand,
+    getCommandResponse,
+    hasCreateCommand
 };
-
-// Uruchom testy jeśli plik wykonywany bezpośrednio
-if (require.main === module) {
-    runParserTests();
-}
