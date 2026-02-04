@@ -1,0 +1,41 @@
+{
+    "_comment": "=== KONFIGURACJA SLACK-CODECKS BOT ===",
+    
+    "defaultDeckId": "WSTAW_ID_DECKA",
+    "_defaultDeckId_help": "ID decka gdzie trafiają nowe taski. Pobierz używając: node src/codecks.js",
+    
+    "allowedChannels": [],
+    "_allowedChannels_help": "Lista ID kanałów Slack do nasłuchiwania. Puste = wszystkie kanały gdzie bot jest obecny.",
+    "_allowedChannels_example": ["C01234ABCDE", "C05678FGHIJ"],
+    
+    "userMapping": {
+        "_help": "Mapowanie imion z wiadomości Slack na ID użytkowników Codecks",
+        "_format": "\"imię nazwisko (lowercase)\": \"codecks_user_id\"",
+        
+        "janek kowalski": "WSTAW_USER_ID_1",
+        "janek k": "WSTAW_USER_ID_1",
+        "janek": "WSTAW_USER_ID_1",
+        
+        "pawel nowak": "WSTAW_USER_ID_2",
+        "paweł nowak": "WSTAW_USER_ID_2",
+        "pawel n": "WSTAW_USER_ID_2",
+        "paweł n": "WSTAW_USER_ID_2",
+        "pawel": "WSTAW_USER_ID_2",
+        
+        "anna kowalska": "WSTAW_USER_ID_3",
+        "anna k": "WSTAW_USER_ID_3",
+        "anna": "WSTAW_USER_ID_3"
+    },
+    
+    "defaultPriority": "b",
+    "_defaultPriority_help": "Domyślny priorytet nowych kart: a (najwyższy) / b / c / d (najniższy)",
+    
+    "confirmationEmoji": "white_check_mark",
+    "_confirmationEmoji_help": "Emoji dodawane do wiadomości gdy wszystkie taski utworzone pomyślnie",
+    
+    "errorEmoji": "warning", 
+    "_errorEmoji_help": "Emoji dodawane gdy wystąpił błąd przy tworzeniu któregoś taska",
+    
+    "sendSummaryReply": false,
+    "_sendSummaryReply_help": "Czy wysyłać odpowiedź w wątku z podsumowaniem utworzonych tasków"
+}
