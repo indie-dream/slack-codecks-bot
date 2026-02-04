@@ -1,13 +1,19 @@
 /**
- * Slack → Codecks Integration Bot
- * Główny serwer aplikacji
+ * Slack → Codecks Integration Bot v2.0
+ * Obsługuje wielopoziomowe taski z description i checkboxami
  */
 
 require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const { WebClient } = require('@slack/web-api');
-const { parseTaskMessage } = require('./parser');
+const { 
+    parseTaskMessage, 
+    buildCardContent, 
+    isCommand, 
+    getCommandResponse,
+    hasCreateCommand 
+} = require('./parser');
 const { CodecksClient } = require('./codecks');
 const configFile = require('../config.json');
 
@@ -122,10 +128,24 @@ async function handleEvent(event) {
         }
     }
     
-    console.log('📨 Nowa wiadomość:', event.text);
+    const messageText = event.text || '';
+    console.log('📨 Nowa wiadomość:', messageText.substring(0, 100));
+    
+    // Sprawdź czy to komenda
+    if (isCommand(messageText)) {
+        console.log('🤖 Komenda wykryta:', messageText.trim());
+        await handleCommand(event.channel, event.ts, messageText);
+        return;
+    }
+    
+    // Sprawdź czy zawiera [Create]
+    if (!hasCreateCommand(messageText)) {
+        console.log('ℹ️ Brak [Create] w wiadomości');
+        return;
+    }
     
     // Parsowanie
-    const tasks = parseTaskMessage(event.text, config.userMapping);
+    const tasks = parseTaskMessage(messageText, config.userMapping);
     
     if (tasks.length === 0) {
         console.log('ℹ️ Brak tasków w wiadomości');
@@ -142,6 +162,26 @@ async function handleEvent(event) {
 }
 
 /**
+ * Obsługuje komendy !help i !commands
+ */
+async function handleCommand(channel, timestamp, message) {
+    const response = getCommandResponse(message);
+    
+    if (response) {
+        try {
+            await slackClient.chat.postMessage({
+                channel: channel,
+                thread_ts: timestamp,
+                text: response
+            });
+            console.log('✅ Odpowiedź na komendę wysłana');
+        } catch (error) {
+            console.error('❌ Błąd wysyłania odpowiedzi:', error.message);
+        }
+    }
+}
+
+/**
  * Tworzy karty w Codecks
  */
 async function createCardsInCodecks(tasks) {
@@ -149,8 +189,11 @@ async function createCardsInCodecks(tasks) {
     
     for (const task of tasks) {
         try {
+            // Buduj pełny content (tytuł + opis + checkboxy)
+            const fullContent = buildCardContent(task);
+            
             const cardData = {
-                content: task.title,
+                content: fullContent,
                 deckId: config.defaultDeckId,
                 assigneeId: task.assigneeId || null,
                 priority: config.defaultPriority || 'b',
@@ -162,10 +205,12 @@ async function createCardsInCodecks(tasks) {
             results.success.push({
                 title: task.title,
                 assignee: task.assigneeName,
-                cardId: card.id
+                cardId: card.id,
+                hasDescription: task.description.length > 0,
+                checkboxCount: task.checkboxes.length
             });
             
-            console.log(`✅ Karta: "${task.title}" → ${task.assigneeName || 'nieprzypisana'}`);
+            console.log(`✅ Karta: "${task.title}" → ${task.assigneeName || 'nieprzypisana'} (${task.description.length} opis, ${task.checkboxes.length} checkbox)`);
             
         } catch (error) {
             results.failed.push({ title: task.title, error: error.message });
@@ -197,152 +242,12 @@ async function addReaction(channel, timestamp, results) {
 }
 
 /**
- * 🆕 Endpoint do listowania decków z Codecks (z UUID!)
- */
-app.get('/list-decks', async (req, res) => {
-    try {
-        console.log('📋 Pobieranie listy decków z Codecks...');
-        
-        const decks = await codecksClient.listDecks();
-        
-        // HTML response dla łatwego czytania
-        let html = `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Codecks Decks</title>
-    <style>
-        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a2e; color: #eee; }
-        h1 { color: #00d9ff; }
-        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-        th, td { border: 1px solid #444; padding: 12px; text-align: left; }
-        th { background: #16213e; color: #00d9ff; }
-        tr:nth-child(even) { background: #1f1f3a; }
-        .uuid { font-family: monospace; background: #2d2d4a; padding: 4px 8px; border-radius: 4px; }
-        .copy-btn { background: #00d9ff; color: #000; border: none; padding: 6px 12px; cursor: pointer; border-radius: 4px; margin-left: 8px; }
-        .copy-btn:hover { background: #00b8d4; }
-        .info { background: #16213e; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
-    </style>
-</head>
-<body>
-    <h1>🎴 Codecks Decks</h1>
-    <div class="info">
-        <strong>Subdomain:</strong> ${process.env.CODECKS_SUBDOMAIN}<br>
-        <strong>Znaleziono:</strong> ${decks.length} deck(ów)
-    </div>
-    <table>
-        <tr>
-            <th>Nazwa</th>
-            <th>UUID (skopiuj do DEFAULT_DECK_ID)</th>
-            <th>Slug (z URL)</th>
-        </tr>`;
-        
-        for (const deck of decks) {
-            html += `
-        <tr>
-            <td><strong>${deck.title || deck.name || 'Bez nazwy'}</strong></td>
-            <td>
-                <span class="uuid">${deck.id}</span>
-                <button class="copy-btn" onclick="navigator.clipboard.writeText('${deck.id}')">📋 Kopiuj</button>
-            </td>
-            <td>${deck.slug || '-'}</td>
-        </tr>`;
-        }
-        
-        html += `
-    </table>
-    <br>
-    <p>👆 Skopiuj UUID decka i wklej do Render → Environment → <code>DEFAULT_DECK_ID</code></p>
-</body>
-</html>`;
-        
-        res.send(html);
-        
-    } catch (error) {
-        console.error('❌ Błąd pobierania decków:', error.message);
-        res.status(500).send(`
-            <h1>❌ Błąd</h1>
-            <p>${error.message}</p>
-            <p>Sprawdź czy CODECKS_TOKEN i CODECKS_SUBDOMAIN są poprawne w Render.</p>
-        `);
-    }
-});
-
-/**
- * 🆕 Endpoint do listowania użytkowników z Codecks (do userMapping)
- */
-app.get('/list-users', async (req, res) => {
-    try {
-        console.log('👥 Pobieranie listy użytkowników z Codecks...');
-        
-        const users = await codecksClient.listUsers();
-        
-        let html = `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Codecks Users</title>
-    <style>
-        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a2e; color: #eee; }
-        h1 { color: #00d9ff; }
-        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-        th, td { border: 1px solid #444; padding: 12px; text-align: left; }
-        th { background: #16213e; color: #00d9ff; }
-        tr:nth-child(even) { background: #1f1f3a; }
-        .uuid { font-family: monospace; background: #2d2d4a; padding: 4px 8px; border-radius: 4px; }
-        code { background: #2d2d4a; padding: 10px; display: block; margin: 20px 0; border-radius: 4px; white-space: pre; }
-    </style>
-</head>
-<body>
-    <h1>👥 Codecks Users</h1>
-    <p>Znaleziono: ${users.length} użytkownik(ów)</p>
-    <table>
-        <tr>
-            <th>Nazwa</th>
-            <th>UUID</th>
-            <th>Email</th>
-        </tr>`;
-        
-        for (const user of users) {
-            html += `
-        <tr>
-            <td><strong>${user.displayName || user.username || 'Bez nazwy'}</strong></td>
-            <td><span class="uuid">${user.id}</span></td>
-            <td>${user.email || '-'}</td>
-        </tr>`;
-        }
-        
-        // Generuj gotowy userMapping
-        let mappingJson = {};
-        for (const user of users) {
-            const name = user.displayName || user.username;
-            if (name) {
-                mappingJson[name.toLowerCase()] = user.id;
-            }
-        }
-        
-        html += `
-    </table>
-    <h2>📋 Gotowy userMapping (do Render):</h2>
-    <code>${JSON.stringify(mappingJson, null, 2)}</code>
-    <p>Skopiuj powyższy JSON i wklej do Render → Environment → <code>USER_MAPPING</code></p>
-</body>
-</html>`;
-        
-        res.send(html);
-        
-    } catch (error) {
-        console.error('❌ Błąd pobierania użytkowników:', error.message);
-        res.status(500).send(`<h1>❌ Błąd</h1><p>${error.message}</p>`);
-    }
-});
-
-/**
  * Health check
  */
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
+        version: '2.0',
         timestamp: new Date().toISOString(),
         defaultDeckId: config.defaultDeckId
     });
@@ -353,12 +258,21 @@ app.get('/health', (req, res) => {
  */
 app.get('/', (req, res) => {
     res.send(`
-        <h1>🤖 Slack-Codecks Bot</h1>
+        <h1>🤖 Slack-Codecks Bot v2.0</h1>
+        <p>Bot obsługuje wielopoziomowe taski z description i checkboxami!</p>
+        <h2>Komendy:</h2>
         <ul>
-            <li><a href="/health">Health Check</a></li>
-            <li><a href="/list-decks">📋 Lista Decków (UUID)</a></li>
-            <li><a href="/list-users">👥 Lista Użytkowników</a></li>
+            <li><code>!help</code> - przykład użycia</li>
+            <li><code>!commands</code> - lista komend</li>
         </ul>
+        <h2>Format:</h2>
+        <pre>
+[Create]
+• Nazwa taska (Owner)
+   • Opis linijka
+      • [ ] Checkbox
+        </pre>
+        <p><a href="/health">Health Check</a></p>
     `);
 });
 
@@ -366,12 +280,12 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║        🚀 Slack → Codecks Bot uruchomiony!               ║
+║      🚀 Slack → Codecks Bot v2.0 uruchomiony!            ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Port:           ${PORT}                                        ║
 ║  Slack Events:   /slack/events                           ║
 ║  Health Check:   /health                                 ║
-║  Default Deck:   ${(config.defaultDeckId || 'nie ustawiono').substring(0, 36).padEnd(36)}  ║
+║  Komendy:        !help, !commands                        ║
 ╚══════════════════════════════════════════════════════════╝
     `);
 });
