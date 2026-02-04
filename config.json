@@ -1,24 +1,9 @@
 {
-    "_comment": "=== KONFIGURACJA SLACK-CODECKS BOT ===",
-    
-    "defaultDeckId": "3-code",
-    "_defaultDeckId_help": "ID decka gdzie trafiają nowe taski. Pobierz używając: node src/codecks.js",
-    
-    "allowedChannels": ["C0ACGF89VRV"],
-    "_allowedChannels_help": "Lista ID kanałów Slack do nasłuchiwania. Puste = wszystkie kanały gdzie bot jest obecny.",
-    "_allowedChannels_example": ["C01234ABCDE", "C05678FGHIJ"],
-    
-    "userMapping": {},
-    
-    "defaultPriority": "b",
-    "_defaultPriority_help": "Domyślny priorytet nowych kart: a (najwyższy) / b / c / d (najniższy)",
-    
-    "confirmationEmoji": "white_check_mark",
-    "_confirmationEmoji_help": "Emoji dodawane do wiadomości gdy wszystkie taski utworzone pomyślnie",
-    
-    "errorEmoji": "warning", 
-    "_errorEmoji_help": "Emoji dodawane gdy wystąpił błąd przy tworzeniu któregoś taska",
-    
-    "sendSummaryReply": false,
-    "_sendSummaryReply_help": "Czy wysyłać odpowiedź w wątku z podsumowaniem utworzonych tasków"
+  "defaultDeckId": "",
+  "allowedChannels": [],
+  "userMapping": {},
+  "defaultPriority": "b",
+  "confirmationEmoji": "white_check_mark",
+  "errorEmoji": "warning",
+  "sendSummaryReply": false
 }
