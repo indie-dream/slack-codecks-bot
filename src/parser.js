@@ -27,10 +27,12 @@ function parseTaskMessage(message, userMapping = {}) {
     }
     
     const tasks = [];
-    const lines = message.split('\n');
+    //const lines = message.split('\n');
+    const lines = message.replace(/\u00A0/g, '  ').split('\n');
     
     // Regex do wykrywania bullet points (-, •, *)
-    const bulletRegex = /^(\s*)([-•*])\s+(.+)$/;
+    //const bulletRegex = /^(\s*)([-•*])\s+(.+)$/;
+    const bulletRegex = /^([\s\u00A0]*)([-•*·◦▪])[\s\u00A0]+(.+)$/;
     
     // Regex do wyodrębnienia przypisania: (Imię) lub (Imię Nazwisko)
     const assigneeRegex = /\(([^)]+)\)\s*$/;
