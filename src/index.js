@@ -145,6 +145,24 @@ async function handleEvent(event) {
     const messageText = event.text || '';
     console.log('📨 Nowa wiadomość:', messageText.substring(0, 100));
     
+    // DEBUG: Pokaż surowy tekst i blocks
+    console.log('🔍 DEBUG RAW event.text:');
+    console.log(JSON.stringify(messageText));
+    if (event.blocks) {
+        console.log('🔍 DEBUG event.blocks:');
+        console.log(JSON.stringify(event.blocks, null, 2));
+    }
+    
+    // Zapisz do debugowania przez endpoint /debug-message
+    lastRawEvent = {
+        timestamp: new Date().toISOString(),
+        text: messageText,
+        textJson: JSON.stringify(messageText),
+        blocks: event.blocks || null,
+        hasBlocks: !!event.blocks,
+        charCodes: [...messageText].map(c => ({ char: c, code: c.charCodeAt(0), hex: 'U+' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') }))
+    };
+    
     // Sprawdź czy to komenda
     if (isCommand(messageText)) {
         console.log('🤖 Komenda wykryta:', messageText.trim());
@@ -735,6 +753,86 @@ app.get('/debug-api', async (req, res) => {
 </html>`;
     
     res.send(html);
+});
+
+// Przechowuj ostatni event do debugowania
+let lastRawEvent = null;
+
+/**
+ * Debug: pokaż surowy event z ostatniej wiadomości
+ */
+app.get('/debug-message', (req, res) => {
+    if (!lastRawEvent) {
+        return res.send('<html><body style="background:#1a1a2e;color:#eee;font-family:monospace;padding:20px"><h1>🔍 Debug Message</h1><p>Brak zapisanych eventów. Wyślij wiadomość na Slacku i odśwież.</p><a href="/" style="color:#00d9ff">← Powrót</a></body></html>');
+    }
+    
+    // Pokaż char-by-char analysis tekstu
+    let charTable = '<table border="1" cellpadding="4" style="border-collapse:collapse;font-size:12px"><tr><th>Pos</th><th>Char</th><th>Code</th><th>Hex</th><th>Name</th></tr>';
+    const charNames = {
+        10: 'NEWLINE (\\n)',
+        13: 'CARRIAGE RETURN (\\r)',
+        32: 'SPACE',
+        42: 'ASTERISK (*)',
+        45: 'HYPHEN (-)',
+        8226: 'BULLET (•)',
+        9702: 'WHITE BULLET (◦)',
+        9679: 'BLACK CIRCLE (●)',
+        8227: 'TRIANGULAR BULLET (‣)',
+        160: 'NON-BREAKING SPACE',
+        9: 'TAB',
+    };
+    
+    for (let i = 0; i < lastRawEvent.charCodes.length && i < 500; i++) {
+        const c = lastRawEvent.charCodes[i];
+        const name = charNames[c.code] || '';
+        const displayChar = c.code === 10 ? '↵' : c.code === 32 ? '·' : c.code === 9 ? '→' : c.code === 160 ? '°' : c.char;
+        const highlight = [10, 8226, 9702, 42, 45].includes(c.code) ? 'background:#2d4a2d' : '';
+        charTable += `<tr style="${highlight}"><td>${i}</td><td>${displayChar}</td><td>${c.code}</td><td>${c.hex}</td><td>${name}</td></tr>`;
+    }
+    charTable += '</table>';
+    
+    // Pokaż tekst z widocznymi znakami specjalnymi
+    const visibleText = lastRawEvent.text
+        .replace(/\n/g, '<span style="color:#4ade80">↵\\n</span>\n')
+        .replace(/ /g, '<span style="color:#555">·</span>')
+        .replace(/\t/g, '<span style="color:#f87171">→TAB</span>');
+    
+    res.send(`
+    <html>
+    <head><title>Debug Message</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a2e; color: #eee; }
+        h1, h2 { color: #00d9ff; }
+        .box { background: #16213e; padding: 15px; border-radius: 8px; margin: 15px 0; overflow-x: auto; }
+        pre { white-space: pre-wrap; word-break: break-all; }
+        a { color: #00d9ff; }
+        table { color: #eee; }
+        th { background: #2d2d4a; }
+    </style>
+    </head>
+    <body>
+        <h1>🔍 Debug: Ostatnia wiadomość Slack</h1>
+        <p>Czas: ${lastRawEvent.timestamp}</p>
+        <p>Ma blocks: ${lastRawEvent.hasBlocks ? '✅ TAK' : '❌ NIE'}</p>
+        
+        <h2>📝 event.text (surowy):</h2>
+        <div class="box"><pre>${visibleText}</pre></div>
+        
+        <h2>📝 event.text (JSON escaped):</h2>
+        <div class="box"><pre>${lastRawEvent.textJson}</pre></div>
+        
+        <h2>🔤 Analiza char-by-char (pierwsze 500 znaków):</h2>
+        <div class="box">${charTable}</div>
+        
+        ${lastRawEvent.blocks ? `
+        <h2>📦 event.blocks:</h2>
+        <div class="box"><pre>${JSON.stringify(lastRawEvent.blocks, null, 2)}</pre></div>
+        ` : ''}
+        
+        <p><a href="/">← Powrót</a> | <a href="/debug-message">🔄 Odśwież</a></p>
+    </body>
+    </html>
+    `);
 });
 
 /**
