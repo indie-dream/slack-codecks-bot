@@ -1,17 +1,15 @@
 /**
- * Parser wiadomości Slack v3.0
+ * Parser wiadomości Slack v3.1
  * 
  * Format:
- * [Create] [Deck: NazwaDecka]
- * 
- * Nazwa Taska (Owner)
+ * [Create] Nazwa Taska (Owner)
  * • Opis linia 1
  * • Opis linia 2
- * • [ ] Checkbox 1
- * • [] Checkbox 2
- *    • Wcięcie w tekście
+ *    • Wcięcie w opisie
+ * • [] Checkbox 1
+ * • [ ] Checkbox 2
  * 
- * Drugi Task
+ * Następny Task (Inna Osoba)
  * • Opis
  */
 
@@ -50,16 +48,52 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
     // Regex do wykrywania checkboxów: [ ], [x], [X], []
     const checkboxRegex = /^\[([xX\s]?)\]\s*(.*)$/;
     
+    // Regex do [Create] z tytułem w tej samej linii
+    const createWithTitleRegex = /\[Create\](?:\s*\[Deck:[^\]]+\])?\s+(.+)/i;
+    
     let currentTask = null;
     let inCreateBlock = false;
-    let lastLineWasDescription = false;
     
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
+        const trimmedLine = line.trim();
         
-        // Sprawdź czy zaczyna się blok [Create]
+        // Sprawdź czy to linia z [Create]
         if (line.includes('[Create]')) {
             inCreateBlock = true;
+            
+            // Sprawdź czy tytuł jest w tej samej linii
+            const createMatch = line.match(createWithTitleRegex);
+            if (createMatch) {
+                let titlePart = createMatch[1].trim();
+                
+                // Wyodrębnij assignee z tytułu
+                let assigneeId = null;
+                let assigneeName = null;
+                
+                const assigneeMatch = titlePart.match(assigneeRegex);
+                if (assigneeMatch) {
+                    assigneeName = assigneeMatch[1].trim();
+                    titlePart = titlePart.replace(assigneeRegex, '').trim();
+                    
+                    // Szukaj w mapowaniu
+                    const normalizedName = normalizeString(assigneeName);
+                    for (const [key, userId] of Object.entries(userMapping)) {
+                        if (normalizeString(key) === normalizedName) {
+                            assigneeId = userId;
+                            break;
+                        }
+                    }
+                }
+                
+                currentTask = {
+                    title: titlePart,
+                    assigneeId: assigneeId,
+                    assigneeName: assigneeName,
+                    description: [],
+                    checkboxes: []
+                };
+            }
             continue;
         }
         
@@ -68,13 +102,8 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
             continue;
         }
         
-        // Pusta linia = separator tasków
-        if (line.trim() === '') {
-            if (currentTask) {
-                tasks.push(currentTask);
-                currentTask = null;
-            }
-            lastLineWasDescription = false;
+        // Pusta linia = potencjalny separator
+        if (trimmedLine === '') {
             continue;
         }
         
@@ -82,7 +111,7 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
         const bulletMatch = line.match(bulletRegex);
         
         if (bulletMatch) {
-            // To jest bullet point
+            // To jest bullet point - ZAWSZE należy do aktualnego taska
             const indent = bulletMatch[1].length;
             let content = bulletMatch[3].trim();
             
@@ -102,36 +131,22 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
                     text: checkboxText,
                     checked: isChecked
                 });
-                lastLineWasDescription = false;
             } else if (indent >= 3) {
-                // Wcięty bullet = wcięcie w tekście (dodaj do poprzedniej linii)
-                if (currentTask.description.length > 0) {
-                    // Dodaj jako nową linię z wcięciem
-                    currentTask.description.push('   ' + content);
-                } else {
-                    currentTask.description.push('   ' + content);
-                }
-                lastLineWasDescription = true;
+                // Wcięty bullet = wcięcie w tekście opisu
+                currentTask.description.push('   • ' + content);
             } else {
                 // Zwykły opis
                 currentTask.description.push(content);
-                lastLineWasDescription = true;
             }
         } else {
-            // Linia bez bullet = nowy task (tytuł)
-            const trimmedLine = line.trim();
+            // Linia bez bullet = NOWY task (tytuł)
             
             // Ignoruj linie z [Deck:] i inne meta
             if (trimmedLine.startsWith('[') && trimmedLine.includes(']')) {
                 continue;
             }
             
-            // Ignoruj puste linie
-            if (trimmedLine === '') {
-                continue;
-            }
-            
-            // Zapisz poprzedni task
+            // Zapisz poprzedni task jeśli istnieje
             if (currentTask) {
                 tasks.push(currentTask);
             }
@@ -163,7 +178,6 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
                 description: [],
                 checkboxes: []
             };
-            lastLineWasDescription = false;
         }
     }
     
@@ -248,41 +262,36 @@ function getCommandResponse(message) {
 
 *Format wiadomości:*
 \`\`\`
-[Create] [Deck: Design]
-
-Nazwa Taska (Owner)
+[Create] Nazwa Taska (Owner)
 • Opis linia 1
 • Opis linia 2
+   • Wcięcie w tekście
 • [ ] Checkbox 1
 • [] Checkbox 2
-   • Wcięcie w tekście
 
-Drugi Task (Inna Osoba)
+Następny Task (Inna Osoba)
 • Opis tego taska
 \`\`\`
 
 *Zasady:*
-• Linia bez bullet (•/-/*) = *Nazwa taska*
-• \`(Imię)\` przy nazwie = *Owner*
+• Tytuł taska = linia bez bullet (•/-/*)
+• \`(Imię)\` przy tytule = Owner
 • \`• tekst\` = Opis
+• \`   • tekst\` (wcięty) = Wcięcie w opisie
 • \`• [ ]\` lub \`• []\` = Checkbox
-• Wcięty \`   •\` = Wcięcie w tekście
-• Pusta linia = Separator tasków
 
 *Przykład:*
 \`\`\`
-[Create]
-
-System walki (Tobiasz)
+[Create] System walki (Tobiasz)
 • Multiplayer support
 • Dodaj animacje
-• [ ] Idle animation
-• [ ] Attack animation
+   • Attack animation
+   • Idle animation
+• [ ] Testy jednostkowe
+• [ ] Code review
 
 UI Design (Anna)
-• Zaprojektuj menu
-   • Główne menu
-   • Opcje
+• Zaprojektuj menu główne
 \`\`\``;
     }
     
