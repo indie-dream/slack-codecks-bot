@@ -1,16 +1,14 @@
 /**
- * Parser wiadomości Slack v3.1
+ * Parser wiadomości Slack v3.2
  * 
  * Format:
  * [Create] Nazwa Taska (Owner)
  * • Opis linia 1
- * • Opis linia 2
  *    • Wcięcie w opisie
- * • [] Checkbox 1
- * • [ ] Checkbox 2
+ * • [] Checkbox
  * 
- * Następny Task (Inna Osoba)
- * • Opis
+ * [Deck: Space/Deck] - obsługuje ścieżkę Space/Deck
+ * [Deck: Deck] - tylko deck (bez space)
  */
 
 /**
@@ -18,21 +16,35 @@
  */
 function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDeckId = null) {
     if (!message || typeof message !== 'string') {
-        return { tasks: [], deckId: defaultDeckId };
+        return { tasks: [], deckId: defaultDeckId, deckPath: null };
     }
     
     // Sprawdź czy wiadomość zawiera [Create]
     if (!message.includes('[Create]')) {
-        return { tasks: [], deckId: defaultDeckId };
+        return { tasks: [], deckId: defaultDeckId, deckPath: null };
     }
     
-    // Wyodrębnij deck z [Deck: nazwa]
+    // Wyodrębnij deck z [Deck: nazwa] lub [Deck: space/nazwa]
     let deckId = defaultDeckId;
+    let deckPath = null;
+    
     const deckMatch = message.match(/\[Deck:\s*([^\]]+)\]/i);
     if (deckMatch) {
-        const deckName = deckMatch[1].trim().toLowerCase();
-        if (deckMapping[deckName]) {
-            deckId = deckMapping[deckName];
+        deckPath = deckMatch[1].trim();
+        const normalizedPath = deckPath.toLowerCase();
+        
+        // Szukaj w mapowaniu (obsługuje "space/deck" i "deck")
+        if (deckMapping[normalizedPath]) {
+            deckId = deckMapping[normalizedPath];
+        } else {
+            // Spróbuj znaleźć bez space (tylko nazwa decka)
+            const deckName = normalizedPath.includes('/') 
+                ? normalizedPath.split('/').pop() 
+                : normalizedPath;
+            
+            if (deckMapping[deckName]) {
+                deckId = deckMapping[deckName];
+            }
         }
     }
     
@@ -67,6 +79,9 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
             if (createMatch) {
                 let titlePart = createMatch[1].trim();
                 
+                // Usuń [Deck: ...] z tytułu jeśli jest
+                titlePart = titlePart.replace(/\[Deck:[^\]]+\]\s*/gi, '').trim();
+                
                 // Wyodrębnij assignee z tytułu
                 let assigneeId = null;
                 let assigneeName = null;
@@ -86,13 +101,15 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
                     }
                 }
                 
-                currentTask = {
-                    title: titlePart,
-                    assigneeId: assigneeId,
-                    assigneeName: assigneeName,
-                    description: [],
-                    checkboxes: []
-                };
+                if (titlePart) {
+                    currentTask = {
+                        title: titlePart,
+                        assigneeId: assigneeId,
+                        assigneeName: assigneeName,
+                        description: [],
+                        checkboxes: []
+                    };
+                }
             }
             continue;
         }
@@ -186,7 +203,7 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
         tasks.push(currentTask);
     }
     
-    return { tasks, deckId };
+    return { tasks, deckId, deckPath };
 }
 
 /**
@@ -254,13 +271,18 @@ function getCommandResponse(message) {
 
 📝 *Atrybuty:*
 • \`[Create]\` - tworzy taski w Codecks
-• \`[Deck: nazwa]\` - wybiera deck (opcjonalne)`;
+• \`[Deck: nazwa]\` - wybiera deck
+• \`[Deck: Space/Deck]\` - wybiera deck w konkretnym Space
+
+📂 *Przykłady Deck:*
+• \`[Deck: Backlog]\` - deck "Backlog"
+• \`[Deck: MT/Backlog]\` - deck "Backlog" w Space "MT"`;
     }
     
     if (trimmed === '!help') {
         return `🤖 *Jak używać Codecks Bot:*
 
-*Format wiadomości:*
+*Podstawowy format:*
 \`\`\`
 [Create] Nazwa Taska (Owner)
 • Opis linia 1
@@ -268,31 +290,43 @@ function getCommandResponse(message) {
    • Wcięcie w tekście
 • [ ] Checkbox 1
 • [] Checkbox 2
+\`\`\`
 
-Następny Task (Inna Osoba)
-• Opis tego taska
+*Z wyborem Deck:*
+\`\`\`
+[Create] [Deck: Backlog] Nazwa Taska (Owner)
+• Opis
+\`\`\`
+
+*Z wyborem Space/Deck:*
+\`\`\`
+[Create] [Deck: MT/Backlog] Nazwa Taska
+• Opis
+\`\`\`
+
+*Wiele tasków:*
+\`\`\`
+[Create] [Deck: MT/Code]
+
+Task Pierwszy (Tobiasz)
+• Opis
+• [ ] Checkbox
+
+Task Drugi (Anna)
+• Inny opis
 \`\`\`
 
 *Zasady:*
-• Tytuł taska = linia bez bullet (•/-/*)
-• \`(Imię)\` przy tytule = Owner
+• Tytuł = linia bez bullet (•/-/*)
+• \`(Imię)\` = Owner
 • \`• tekst\` = Opis
-• \`   • tekst\` (wcięty) = Wcięcie w opisie
+• \`   • tekst\` = Wcięcie w opisie
 • \`• [ ]\` lub \`• []\` = Checkbox
+• Pusta linia = separator tasków
 
-*Przykład:*
-\`\`\`
-[Create] System walki (Tobiasz)
-• Multiplayer support
-• Dodaj animacje
-   • Attack animation
-   • Idle animation
-• [ ] Testy jednostkowe
-• [ ] Code review
-
-UI Design (Anna)
-• Zaprojektuj menu główne
-\`\`\``;
+*Format Deck:*
+• \`[Deck: Nazwa]\` - sam deck
+• \`[Deck: Space/Deck]\` - deck w Space`;
     }
     
     return null;
