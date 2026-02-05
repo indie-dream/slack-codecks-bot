@@ -52,7 +52,7 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
     const lines = message.split('\n');
     
     // Regex do wykrywania bullet points (-, •, *)
-    const bulletRegex = /^(\s*)([-•*])\s+(.*)$/;
+    const bulletRegex = /^(\s*)([-•*◦])\s+(.*)$/;
     
     // Regex do wyodrębnienia przypisania: (Imię) lub (Imię Nazwisko)
     const assigneeRegex = /\(([^)]+)\)\s*$/;
