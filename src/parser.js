@@ -1,175 +1,252 @@
 /**
- * Parser wiadomości Slack v3.2
+ * Parser wiadomości Slack v4.1
  * 
- * Format:
- * [Create] Nazwa Taska (Owner)
- * • Opis linia 1
- *    • Wcięcie w opisie
- * • [] Checkbox
+ * NOWE FUNKCJE:
+ * 1. Wiele bloków [Create] w jednej wiadomości (każdy z własnym Deck)
+ * 2. Bullet jako tytuł - gdy brak linii bez bullet
  * 
- * [Deck: Space/Deck] - obsługuje ścieżkę Space/Deck
- * [Deck: Deck] - tylko deck (bez space)
+ * FORMAT STANDARDOWY:
+ * [Create] [Deck: Space/Deck] Tytuł Taska (Owner)
+ * • Opis
+ * • [ ] Checkbox
+ * 
+ * FORMAT BULLET-AS-TITLE:
+ * [Create] [Deck: Space/Deck]
+ * • Tytuł Taska (Owner)
+ *    • Opis (wcięcie = description)
+ *       • Głębsze wcięcie = bullet w Codecks
+ * 
+ * WIELE BLOKÓW:
+ * [Create] [Deck: Art] Task 1
+ * • Opis
+ * 
+ * [Create] [Deck: Code] Task 2
+ * • Opis
  */
 
 /**
- * Parsuje wiadomość Slack i wyodrębnia taski
+ * Główna funkcja parsująca - zwraca tablicę bloków
+ * Każdy blok ma: { tasks: [], deckPath: string }
  */
-function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDeckId = null) {
+function parseTaskMessage(message) {
     if (!message || typeof message !== 'string') {
-        return { tasks: [], deckId: defaultDeckId, deckPath: null };
+        return { tasks: [], deckPath: null, blocks: [] };
     }
     
     // Sprawdź czy wiadomość zawiera [Create]
     if (!message.includes('[Create]')) {
-        return { tasks: [], deckId: defaultDeckId, deckPath: null };
+        return { tasks: [], deckPath: null, blocks: [] };
     }
     
-    // Wyodrębnij deck z [Deck: nazwa] lub [Deck: space/nazwa]
-    let deckId = defaultDeckId;
-    let deckPath = null;
+    // Podziel na bloki [Create]
+    const blocks = splitIntoCreateBlocks(message);
     
-    const deckMatch = message.match(/\[Deck:\s*([^\]]+)\]/i);
-    if (deckMatch) {
-        deckPath = deckMatch[1].trim();
-        const normalizedPath = deckPath.toLowerCase();
+    // Parsuj każdy blok osobno
+    const allTasks = [];
+    let firstDeckPath = null;
+    
+    for (const block of blocks) {
+        const { tasks, deckPath } = parseCreateBlock(block);
         
-        // Szukaj w mapowaniu (obsługuje "space/deck" i "deck")
-        if (deckMapping[normalizedPath]) {
-            deckId = deckMapping[normalizedPath];
-        } else {
-            // Spróbuj znaleźć bez space (tylko nazwa decka)
-            const deckName = normalizedPath.includes('/') 
-                ? normalizedPath.split('/').pop() 
-                : normalizedPath;
-            
-            if (deckMapping[deckName]) {
-                deckId = deckMapping[deckName];
-            }
+        if (firstDeckPath === null && deckPath) {
+            firstDeckPath = deckPath;
+        }
+        
+        // Każdy task dostaje swój deckPath
+        for (const task of tasks) {
+            task.deckPath = deckPath;
+            allTasks.push(task);
         }
     }
     
-    const tasks = [];
+    // Kompatybilność wsteczna + nowe blocks
+    return { 
+        tasks: allTasks, 
+        deckPath: firstDeckPath,
+        blocks: blocks.map(b => parseCreateBlock(b))
+    };
+}
+
+/**
+ * Dzieli wiadomość na bloki [Create]
+ */
+function splitIntoCreateBlocks(message) {
+    const blocks = [];
     const lines = message.split('\n');
     
-    // Regex do wykrywania bullet points (-, •, *)
-    const bulletRegex = /^(\s*)([-•*◦])\s+(.*)$/;
+    let currentBlock = [];
+    let inBlock = false;
     
-    // Regex do wyodrębnienia przypisania: (Imię) lub (Imię Nazwisko)
+    for (const line of lines) {
+        if (line.includes('[Create]')) {
+            // Zapisz poprzedni blok
+            if (currentBlock.length > 0) {
+                blocks.push(currentBlock.join('\n'));
+            }
+            // Rozpocznij nowy blok
+            currentBlock = [line];
+            inBlock = true;
+        } else if (inBlock) {
+            currentBlock.push(line);
+        }
+    }
+    
+    // Zapisz ostatni blok
+    if (currentBlock.length > 0) {
+        blocks.push(currentBlock.join('\n'));
+    }
+    
+    return blocks;
+}
+
+/**
+ * Parsuje pojedynczy blok [Create]
+ */
+function parseCreateBlock(blockText) {
+    const lines = blockText.split('\n');
+    
+    // Wyodrębnij deck path
+    let deckPath = null;
+    const deckMatch = blockText.match(/\[Deck:\s*([^\]]+)\]/i);
+    if (deckMatch) {
+        deckPath = deckMatch[1].trim();
+    }
+    
+    // Regex
+    const bulletRegex = /^(\s*)([-•*])\s+(.*)$/;
     const assigneeRegex = /\(([^)]+)\)\s*$/;
-    
-    // Regex do wykrywania checkboxów: [ ], [x], [X], []
     const checkboxRegex = /^\[([xX\s]?)\]\s*(.*)$/;
-    
-    // Regex do [Create] z tytułem w tej samej linii
     const createWithTitleRegex = /\[Create\](?:\s*\[Deck:[^\]]+\])?\s+(.+)/i;
     
+    const tasks = [];
     let currentTask = null;
-    let inCreateBlock = false;
+    let hasNonBulletTitle = false;
     
-    for (let i = 0; i < lines.length; i++) {
+    // Sprawdź czy [Create] ma tytuł w tej samej linii
+    const firstLine = lines[0];
+    const createMatch = firstLine.match(createWithTitleRegex);
+    
+    if (createMatch) {
+        let titlePart = createMatch[1].trim();
+        titlePart = titlePart.replace(/\[Deck:[^\]]+\]\s*/gi, '').trim();
+        
+        if (titlePart) {
+            hasNonBulletTitle = true;
+            let assigneeName = null;
+            
+            const assigneeMatch = titlePart.match(assigneeRegex);
+            if (assigneeMatch) {
+                assigneeName = assigneeMatch[1].trim();
+                titlePart = titlePart.replace(assigneeRegex, '').trim();
+            }
+            
+            currentTask = {
+                title: titlePart,
+                assigneeName: assigneeName,
+                description: [],
+                checkboxes: []
+            };
+        }
+    }
+    
+    // Parsuj pozostałe linie
+    for (let i = 1; i < lines.length; i++) {
         const line = lines[i];
         const trimmedLine = line.trim();
         
-        // Sprawdź czy to linia z [Create]
-        if (line.includes('[Create]')) {
-            inCreateBlock = true;
+        if (trimmedLine === '') continue;
+        
+        // Sprawdź czy to bullet
+        const bulletMatch = line.match(bulletRegex);
+        
+        if (bulletMatch) {
+            const indent = bulletMatch[1].length;
+            let content = bulletMatch[3].trim();
             
-            // Sprawdź czy tytuł jest w tej samej linii
-            const createMatch = line.match(createWithTitleRegex);
-            if (createMatch) {
-                let titlePart = createMatch[1].trim();
+            // Sprawdź checkbox
+            const checkboxMatch = content.match(checkboxRegex);
+            
+            if (indent === 0 || indent <= 1) {
+                // Poziom 0 - główny bullet
                 
-                // Usuń [Deck: ...] z tytułu jeśli jest
-                titlePart = titlePart.replace(/\[Deck:[^\]]+\]\s*/gi, '').trim();
-                
-                // Wyodrębnij assignee z tytułu
-                let assigneeId = null;
-                let assigneeName = null;
-                
-                const assigneeMatch = titlePart.match(assigneeRegex);
-                if (assigneeMatch) {
-                    assigneeName = assigneeMatch[1].trim();
-                    titlePart = titlePart.replace(assigneeRegex, '').trim();
+                if (!hasNonBulletTitle && !currentTask) {
+                    // BULLET-AS-TITLE: pierwszy główny bullet = tytuł
+                    let assigneeName = null;
+                    let titleText = content;
                     
-                    // Szukaj w mapowaniu
-                    const normalizedName = normalizeString(assigneeName);
-                    for (const [key, userId] of Object.entries(userMapping)) {
-                        if (normalizeString(key) === normalizedName) {
-                            assigneeId = userId;
-                            break;
-                        }
+                    // Usuń checkbox jeśli jest
+                    if (checkboxMatch) {
+                        titleText = checkboxMatch[2].trim();
                     }
-                }
-                
-                if (titlePart) {
+                    
+                    const assigneeMatch = titleText.match(assigneeRegex);
+                    if (assigneeMatch) {
+                        assigneeName = assigneeMatch[1].trim();
+                        titleText = titleText.replace(assigneeRegex, '').trim();
+                    }
+                    
                     currentTask = {
-                        title: titlePart,
-                        assigneeId: assigneeId,
+                        title: titleText,
                         assigneeName: assigneeName,
                         description: [],
                         checkboxes: []
                     };
+                } else if (currentTask) {
+                    // Kolejny główny bullet
+                    if (checkboxMatch) {
+                        // To jest checkbox
+                        const isChecked = checkboxMatch[1].toLowerCase() === 'x';
+                        currentTask.checkboxes.push({
+                            text: checkboxMatch[2].trim(),
+                            checked: isChecked
+                        });
+                    } else {
+                        // To jest opis
+                        currentTask.description.push(content);
+                    }
+                }
+                
+            } else if (indent >= 2 && indent <= 4) {
+                // Poziom 1 (2-4 spacje) - description lub sub-item
+                if (currentTask) {
+                    if (checkboxMatch) {
+                        currentTask.checkboxes.push({
+                            text: checkboxMatch[2].trim(),
+                            checked: checkboxMatch[1].toLowerCase() === 'x'
+                        });
+                    } else {
+                        currentTask.description.push(content);
+                    }
+                }
+                
+            } else if (indent >= 5) {
+                // Poziom 2+ (5+ spacji) - głębsze wcięcie = bullet w tekście
+                if (currentTask) {
+                    if (checkboxMatch) {
+                        currentTask.checkboxes.push({
+                            text: checkboxMatch[2].trim(),
+                            checked: checkboxMatch[1].toLowerCase() === 'x'
+                        });
+                    } else {
+                        // Zachowaj jako wcięty bullet w opisie
+                        currentTask.description.push('   • ' + content);
+                    }
                 }
             }
-            continue;
-        }
-        
-        // Ignoruj linie przed [Create]
-        if (!inCreateBlock) {
-            continue;
-        }
-        
-        // Pusta linia = potencjalny separator
-        if (trimmedLine === '') {
-            continue;
-        }
-        
-        // Sprawdź czy to bullet point
-        const bulletMatch = line.match(bulletRegex);
-        
-        if (bulletMatch) {
-            // To jest bullet point - ZAWSZE należy do aktualnego taska
-            const indent = bulletMatch[1].length;
-            let content = bulletMatch[3].trim();
             
-            // Jeśli nie ma aktywnego taska, ignoruj
-            if (!currentTask) {
-                continue;
-            }
-            
-            // Sprawdź czy to checkbox: [ ], [], [x]
-            const checkboxMatch = content.match(checkboxRegex);
-            
-            if (checkboxMatch) {
-                // To jest checkbox
-                const isChecked = checkboxMatch[1].toLowerCase() === 'x';
-                const checkboxText = checkboxMatch[2].trim();
-                currentTask.checkboxes.push({
-                    text: checkboxText,
-                    checked: isChecked
-                });
-            } else if (indent >= 3) {
-                // Wcięty bullet = wcięcie w tekście opisu
-                currentTask.description.push('   • ' + content);
-            } else {
-                // Zwykły opis
-                currentTask.description.push(content);
-            }
         } else {
-            // Linia bez bullet = NOWY task (tytuł)
+            // Linia bez bullet
             
-            // Ignoruj linie z [Deck:] i inne meta
+            // Ignoruj meta linie
             if (trimmedLine.startsWith('[') && trimmedLine.includes(']')) {
                 continue;
             }
             
-            // Zapisz poprzedni task jeśli istnieje
+            // NOWY TASK (tradycyjny format)
             if (currentTask) {
                 tasks.push(currentTask);
             }
             
-            // Wyodrębnij assignee
-            let assigneeId = null;
             let assigneeName = null;
             let taskTitle = trimmedLine;
             
@@ -177,24 +254,15 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
             if (assigneeMatch) {
                 assigneeName = assigneeMatch[1].trim();
                 taskTitle = trimmedLine.replace(assigneeRegex, '').trim();
-                
-                // Szukaj w mapowaniu
-                const normalizedName = normalizeString(assigneeName);
-                for (const [key, userId] of Object.entries(userMapping)) {
-                    if (normalizeString(key) === normalizedName) {
-                        assigneeId = userId;
-                        break;
-                    }
-                }
             }
             
             currentTask = {
                 title: taskTitle,
-                assigneeId: assigneeId,
                 assigneeName: assigneeName,
                 description: [],
                 checkboxes: []
             };
+            hasNonBulletTitle = true;
         }
     }
     
@@ -203,7 +271,7 @@ function parseTaskMessage(message, userMapping = {}, deckMapping = {}, defaultDe
         tasks.push(currentTask);
     }
     
-    return { tasks, deckId, deckPath };
+    return { tasks, deckPath };
 }
 
 /**
@@ -219,11 +287,7 @@ function buildCardContent(task) {
     
     // Dodaj checkboxy
     if (task.checkboxes && task.checkboxes.length > 0) {
-        if (task.description.length > 0) {
-            content += '\n';
-        } else {
-            content += '\n';
-        }
+        content += '\n';
         for (const checkbox of task.checkboxes) {
             const mark = checkbox.checked ? 'x' : ' ';
             content += `\n- [${mark}] ${checkbox.text}`;
@@ -254,79 +318,82 @@ function isCommand(message) {
         return false;
     }
     const trimmed = message.trim().toLowerCase();
-    return trimmed === '!help' || trimmed === '!commands';
+    return trimmed === '!help' || 
+           trimmed === '!commands' || 
+           trimmed === '!status' ||
+           trimmed === '!refresh';
 }
 
 /**
  * Zwraca odpowiedź na komendę
  */
-function getCommandResponse(message) {
+function getCommandResponse(message, cacheStats = null) {
     const trimmed = message.trim().toLowerCase();
     
     if (trimmed === '!commands') {
         return `📋 *Dostępne komendy:*
 
 • \`!commands\` - pokazuje tę listę
-• \`!help\` - pokazuje przykład użycia
+• \`!help\` - przykład użycia
+• \`!status\` - status cache mappingów
+• \`!refresh\` - odśwież cache
 
 📝 *Atrybuty:*
 • \`[Create]\` - tworzy taski w Codecks
 • \`[Deck: nazwa]\` - wybiera deck
-• \`[Deck: Space/Deck]\` - wybiera deck w konkretnym Space
+• \`[Deck: Space/Deck]\` - wybiera deck w konkretnym Space`;
+    }
+    
+    if (trimmed === '!status') {
+        if (cacheStats) {
+            return `🔄 *Status Cache:*
 
-📂 *Przykłady Deck:*
-• \`[Deck: Backlog]\` - deck "Backlog"
-• \`[Deck: MT/Backlog]\` - deck "Backlog" w Space "MT"`;
+• 📂 Spaces: ${cacheStats.spaces}
+• 🎴 Decks: ${cacheStats.decks}
+• 🛤️ Deck paths: ${cacheStats.deckPaths}
+• 👥 Users: ${cacheStats.users}
+• ⏰ Ostatnie odświeżenie: ${cacheStats.lastRefresh ? new Date(cacheStats.lastRefresh).toLocaleString('pl-PL') : 'nigdy'}`;
+        }
+        return '⚠️ Cache nie jest zainicjalizowany';
     }
     
     if (trimmed === '!help') {
-        return `🤖 *Jak używać Codecks Bot:*
+        return `🤖 *Jak używać Codecks Bot v4.1:*
 
-*Podstawowy format:*
+*FORMAT 1 - Standardowy:*
 \`\`\`
-[Create] Nazwa Taska (Owner)
+[Create] [Deck: Code] Nazwa Taska (Owner)
 • Opis linia 1
-• Opis linia 2
-   • Wcięcie w tekście
-• [ ] Checkbox 1
-• [] Checkbox 2
-\`\`\`
-
-*Z wyborem Deck:*
-\`\`\`
-[Create] [Deck: Backlog] Nazwa Taska (Owner)
-• Opis
-\`\`\`
-
-*Z wyborem Space/Deck:*
-\`\`\`
-[Create] [Deck: MT/Backlog] Nazwa Taska
-• Opis
-\`\`\`
-
-*Wiele tasków:*
-\`\`\`
-[Create] [Deck: MT/Code]
-
-Task Pierwszy (Tobiasz)
-• Opis
 • [ ] Checkbox
+\`\`\`
 
-Task Drugi (Anna)
+*FORMAT 2 - Bullet jako tytuł:*
+\`\`\`
+[Create] [Deck: Code]
+• Nazwa Taska (Owner)
+   • To jest opis
+   • [ ] Checkbox
+      • Wcięty tekst w opisie
+\`\`\`
+
+*WIELE DECKÓW w jednej wiadomości:*
+\`\`\`
+[Create] [Deck: Art] Task graficzny
+• Opis
+
+[Create] [Deck: Code] Task programistyczny
 • Inny opis
 \`\`\`
 
-*Zasady:*
-• Tytuł = linia bez bullet (•/-/*)
-• \`(Imię)\` = Owner
-• \`• tekst\` = Opis
-• \`   • tekst\` = Wcięcie w opisie
-• \`• [ ]\` lub \`• []\` = Checkbox
-• Pusta linia = separator tasków
+*Poziomy wcięć (Format 2):*
+• \`• tekst\` (0 spacji) = Tytuł taska
+• \`   • tekst\` (3 spacje) = Opis
+• \`      • tekst\` (6 spacji) = Wcięty bullet w opisie
 
-*Format Deck:*
-• \`[Deck: Nazwa]\` - sam deck
-• \`[Deck: Space/Deck]\` - deck w Space`;
+*Zasady:*
+• \`(Imię)\` = Owner
+• \`• [ ]\` lub \`• []\` = Checkbox
+• Pusta linia = separator`;
     }
     
     return null;
@@ -341,6 +408,8 @@ function hasCreateCommand(message) {
 
 module.exports = {
     parseTaskMessage,
+    parseCreateBlock,
+    splitIntoCreateBlocks,
     buildCardContent,
     normalizeString,
     isCommand,

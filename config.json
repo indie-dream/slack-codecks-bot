@@ -1,8 +1,10 @@
 {
   "defaultDeckId": "",
+  "defaultDeckName": "",
   "allowedChannels": [],
-  "userMapping": {},
+  "spaceMapping": {},
   "deckMapping": {},
+  "userMapping": {},
   "defaultPriority": "b",
   "confirmationEmoji": "white_check_mark",
   "errorEmoji": "warning"
