@@ -1,6 +1,6 @@
 /**
- * Slack → Codecks Integration Bot v2.0
- * Obsługuje wielopoziomowe taski z description i checkboxami
+ * Slack → Codecks Integration Bot v3.0
+ * Obsługuje wielopoziomowe taski z wyborem decka
  */
 
 require('dotenv').config();
@@ -26,7 +26,10 @@ const config = {
         : configFile.allowedChannels,
     userMapping: process.env.USER_MAPPING 
         ? JSON.parse(process.env.USER_MAPPING) 
-        : configFile.userMapping
+        : configFile.userMapping || {},
+    deckMapping: process.env.DECK_MAPPING
+        ? JSON.parse(process.env.DECK_MAPPING)
+        : configFile.deckMapping || {}
 };
 
 const app = express();
@@ -144,18 +147,23 @@ async function handleEvent(event) {
         return;
     }
     
-    // Parsowanie
-    const tasks = parseTaskMessage(messageText, config.userMapping);
+    // Parsowanie z obsługą deck mapping
+    const { tasks, deckId } = parseTaskMessage(
+        messageText, 
+        config.userMapping, 
+        config.deckMapping,
+        config.defaultDeckId
+    );
     
     if (tasks.length === 0) {
         console.log('ℹ️ Brak tasków w wiadomości');
         return;
     }
     
-    console.log(`📋 Znaleziono ${tasks.length} task(ów)`);
+    console.log(`📋 Znaleziono ${tasks.length} task(ów), Deck: ${deckId}`);
     
     // Tworzenie kart
-    const results = await createCardsInCodecks(tasks);
+    const results = await createCardsInCodecks(tasks, deckId);
     
     // Reakcja
     await addReaction(event.channel, event.ts, results);
@@ -184,7 +192,7 @@ async function handleCommand(channel, timestamp, message) {
 /**
  * Tworzy karty w Codecks
  */
-async function createCardsInCodecks(tasks) {
+async function createCardsInCodecks(tasks, deckId) {
     const results = { success: [], failed: [] };
     
     for (const task of tasks) {
@@ -194,7 +202,7 @@ async function createCardsInCodecks(tasks) {
             
             const cardData = {
                 content: fullContent,
-                deckId: config.defaultDeckId,
+                deckId: deckId,
                 assigneeId: task.assigneeId || null,
                 priority: config.defaultPriority || 'b',
                 putOnHand: task.assigneeId ? true : false
@@ -206,7 +214,7 @@ async function createCardsInCodecks(tasks) {
                 title: task.title,
                 assignee: task.assigneeName,
                 cardId: card.id,
-                hasDescription: task.description.length > 0,
+                descLines: task.description.length,
                 checkboxCount: task.checkboxes.length
             });
             
@@ -247,9 +255,11 @@ async function addReaction(channel, timestamp, results) {
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
-        version: '2.0',
+        version: '3.0',
         timestamp: new Date().toISOString(),
-        defaultDeckId: config.defaultDeckId
+        defaultDeckId: config.defaultDeckId,
+        decksConfigured: Object.keys(config.deckMapping).length,
+        usersConfigured: Object.keys(config.userMapping).length
     });
 });
 
@@ -258,20 +268,35 @@ app.get('/health', (req, res) => {
  */
 app.get('/', (req, res) => {
     res.send(`
-        <h1>🤖 Slack-Codecks Bot v2.0</h1>
-        <p>Bot obsługuje wielopoziomowe taski z description i checkboxami!</p>
+        <h1>🤖 Slack-Codecks Bot v3.0</h1>
+        
         <h2>Komendy:</h2>
         <ul>
             <li><code>!help</code> - przykład użycia</li>
             <li><code>!commands</code> - lista komend</li>
         </ul>
+        
         <h2>Format:</h2>
-        <pre>
-[Create]
-• Nazwa taska (Owner)
-   • Opis linijka
-      • [ ] Checkbox
+        <pre style="background:#1a1a2e;color:#eee;padding:15px;border-radius:8px;">
+[Create] [Deck: Design]
+
+Nazwa Taska (Owner)
+• Opis linia 1
+• Opis linia 2
+• [ ] Checkbox
+   • Wcięcie w tekście
+
+Drugi Task
+• Opis
         </pre>
+        
+        <h2>Konfiguracja:</h2>
+        <ul>
+            <li>Default Deck: <code>${config.defaultDeckId || 'nie ustawiono'}</code></li>
+            <li>Decks: ${Object.keys(config.deckMapping).join(', ') || 'brak'}</li>
+            <li>Users: ${Object.keys(config.userMapping).join(', ') || 'brak'}</li>
+        </ul>
+        
         <p><a href="/health">Health Check</a></p>
     `);
 });
@@ -280,12 +305,14 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║      🚀 Slack → Codecks Bot v2.0 uruchomiony!            ║
+║      🚀 Slack → Codecks Bot v3.0 uruchomiony!            ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Port:           ${PORT}                                        ║
 ║  Slack Events:   /slack/events                           ║
 ║  Health Check:   /health                                 ║
 ║  Komendy:        !help, !commands                        ║
+║  Decks:          ${Object.keys(config.deckMapping).length} skonfigurowanych                       ║
+║  Users:          ${Object.keys(config.userMapping).length} skonfigurowanych                       ║
 ╚══════════════════════════════════════════════════════════╝
     `);
 });
