@@ -14,7 +14,6 @@ slack-codecks-bot/
 │   └── codecks.js    # Klient API Codecks
 ├── config.json       # Konfiguracja publiczna (puste wartości)
 ├── package.json      # Zależności npm
-├── .env.example      # Przykład zmiennych środowiskowych
 ├── .gitignore        # Ignorowane pliki
 └── README.md         # Ta dokumentacja
 ```
