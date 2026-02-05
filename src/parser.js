@@ -401,14 +401,17 @@ function parseCreateBlockText(blockText) {
  * Buduje content karty dla Codecks
  */
 function buildCardContent(task) {
-    let content = '';
+    // Codecks bierze pierwszą linię content jako tytuł karty!
+    let content = task.title;
     
+    // Description
     if (task.description && task.description.length > 0) {
-        content += task.description.join('\n');
+        content += '\n\n' + task.description.join('\n');
     }
     
+    // Checkboxy
     if (task.checkboxes && task.checkboxes.length > 0) {
-        if (content) content += '\n';
+        content += '\n';
         for (const checkbox of task.checkboxes) {
             const mark = checkbox.checked ? 'x' : ' ';
             content += `\n- [${mark}] ${checkbox.text}`;
