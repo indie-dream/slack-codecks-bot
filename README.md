@@ -18,6 +18,14 @@ slack-codecks-bot/
 ├── .gitignore        # Ignorowane pliki
 └── README.md         # Ta dokumentacja
 ```
+
+### ❌ Pliki które możesz usunąć z GitHub (jeśli są):
+- `node_modules/` - instalowane automatycznie
+- `.env` - NIGDY nie commituj! (dane wrażliwe)
+- `package-lock.json` - opcjonalnie
+- `yarn.lock` - opcjonalnie
+- Inne pliki testowe/tymczasowe
+
 ---
 
 ## 🚀 Szybki start
@@ -66,11 +74,9 @@ W Render Dashboard → Environment dodaj te zmienne:
 3. Lewe menu → **OAuth & Permissions**
 4. Sekcja **Bot Token Scopes** - dodaj:
    - `channels:history`
-   - `channels:manage`
    - `channels:read`
    - `chat:write`
    - `reactions:write`
-   - `reactions:read`
 5. Kliknij **Install to Workspace** (góra strony)
 6. Skopiuj **Bot User OAuth Token** (`xoxb-...`)
 
@@ -167,16 +173,23 @@ Mapowanie imion na UUID użytkowników Codecks.
 
 ### DECK_MAPPING
 
-Mapowanie nazw decków na UUID (do używania `[Deck: nazwa]`).
+Mapowanie nazw decków na UUID. Obsługuje **Space/Deck** lub sam **Deck**.
 
 **Format:** JSON w jednej linii
 ```json
-{"design":"uuid-decka-design","code":"uuid-decka-code","bugs":"uuid-decka-bugs"}
+{"mt/backlog":"uuid-1","mt/code":"uuid-2","design":"uuid-3"}
 ```
 
-**Jak znaleźć UUID decka:** tak samo jak DEFAULT_DECK_ID
+**Przykłady użycia w Slack:**
+| W wiadomości | Szuka w DECK_MAPPING |
+|--------------|---------------------|
+| `[Deck: MT/Backlog]` | `"mt/backlog"` |
+| `[Deck: MT/Code]` | `"mt/code"` |
+| `[Deck: Design]` | `"design"` |
 
-💡 Nazwy są case-insensitive (`Design` = `design` = `DESIGN`)
+**Jak znaleźć UUID decka:** tak samo jak DEFAULT_DECK_ID (Network tab)
+
+💡 Nazwy są case-insensitive (`MT/Backlog` = `mt/backlog` = `MT/BACKLOG`)
 
 ---
 
@@ -194,8 +207,6 @@ Dodaj **Bot Token Scopes**:
 - `channels:read` - lista kanałów
 - `chat:write` - wysyłanie wiadomości
 - `reactions:write` - dodawanie reakcji emoji
-- `channels:manage` - zarządza kanałem
-- `reactions:read` - odczytuje reakcje
 
 ### 3. Event Subscriptions
 1. **Event Subscriptions** → włącz **Enable Events**
@@ -252,6 +263,7 @@ Nazwa Taska (Tobiasz)
 |---------|-----------|-----------|
 | `[Create]` | Na początku | Uruchamia tworzenie tasków |
 | `[Deck: nazwa]` | Po [Create] | Wybiera deck (opcjonalne) |
+| `[Deck: Space/Deck]` | Po [Create] | Wybiera deck w Space |
 | `Nazwa taska` | Bez bullet | Tytuł nowej karty |
 | `(Owner)` | Przy nazwie | Przypisuje osobę |
 | `• tekst` | Z bullet | Linia opisu |
@@ -323,6 +335,18 @@ Crash na iOS
 • Dotyczy iOS 17+
 ```
 
+### Z wyborem Space/Deck:
+```
+[Create] [Deck: MT/Backlog]
+
+Nowy feature (Tobiasz)
+• Opis feature'a
+   • Szczegóły implementacji
+• [ ] Code review
+• [ ] Deploy
+```
+`MT` = Space, `Backlog` = Deck w tym Space
+
 ---
 
 ## 🔧 Troubleshooting
@@ -393,6 +417,13 @@ Crash na iOS
 ---
 
 ## 📝 Changelog
+
+### v3.2
+- Obsługa `[Deck: Space/Deck]` - wybór decka w Space
+- Zaktualizowane `!help` i `!commands`
+
+### v3.1
+- Naprawione wcięcia (nie tworzą nowego taska)
 
 ### v3.0
 - Nowa architektura wiadomości (tytuł bez bullet)
