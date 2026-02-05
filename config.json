@@ -2,8 +2,8 @@
   "defaultDeckId": "",
   "allowedChannels": [],
   "userMapping": {},
+  "deckMapping": {},
   "defaultPriority": "b",
   "confirmationEmoji": "white_check_mark",
-  "errorEmoji": "warning",
-  "sendSummaryReply": true
+  "errorEmoji": "warning"
 }
