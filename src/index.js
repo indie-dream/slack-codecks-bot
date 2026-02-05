@@ -148,7 +148,7 @@ async function handleEvent(event) {
     }
     
     // Parsowanie z obsługą deck mapping
-    const { tasks, deckId } = parseTaskMessage(
+    const { tasks, deckId, deckPath } = parseTaskMessage(
         messageText, 
         config.userMapping, 
         config.deckMapping,
@@ -160,7 +160,7 @@ async function handleEvent(event) {
         return;
     }
     
-    console.log(`📋 Znaleziono ${tasks.length} task(ów), Deck: ${deckId}`);
+    console.log(`📋 Znaleziono ${tasks.length} task(ów)${deckPath ? ` [Deck: ${deckPath}]` : ''}`);
     
     // Tworzenie kart
     const results = await createCardsInCodecks(tasks, deckId);
@@ -255,7 +255,7 @@ async function addReaction(channel, timestamp, results) {
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
-        version: '3.0',
+        version: '3.2',
         timestamp: new Date().toISOString(),
         defaultDeckId: config.defaultDeckId,
         decksConfigured: Object.keys(config.deckMapping).length,
@@ -305,7 +305,7 @@ Drugi Task
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║      🚀 Slack → Codecks Bot v3.0 uruchomiony!            ║
+║      🚀 Slack → Codecks Bot v3.2 uruchomiony!            ║
 ╠══════════════════════════════════════════════════════════╣
 ║  Port:           ${PORT}                                        ║
 ║  Slack Events:   /slack/events                           ║
