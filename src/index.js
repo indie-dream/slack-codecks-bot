@@ -188,8 +188,8 @@ async function handleEvent(event) {
         }
     }
     
-    // Parsowanie wiadomości (bez resolvowania UUID)
-    const { tasks, deckPath } = parseTaskMessage(messageText);
+    // Parsowanie wiadomości — blocks (rich_text) mają priorytet nad text
+    const { tasks, deckPath } = parseTaskMessage(messageText, event.blocks || null);
     
     if (tasks.length === 0) {
         console.log('ℹ️ Brak tasków w wiadomości');

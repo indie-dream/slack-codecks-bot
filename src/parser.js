@@ -1,126 +1,196 @@
 /**
- * Parser wiadomości Slack v5.0
+ * Parser wiadomości Slack v5.1
  * 
- * JEDYNY FORMAT (bullet-as-title):
+ * CZYTA event.blocks (rich_text) zamiast event.text!
  * 
- * [Create] [Deck: Space/Deck]
- * • Nazwa Taska (Owner)
- *    • Opis linia 1
- *    • [ ] Checkbox
- *       • To dodaje "- " w Codecks description
- *       • [ ] Checkbox z głębszego poziomu też działa
- * • Następny Task (Owner2)
- *    • Opis
+ * Slack w event.text SPŁASZCZA wcięcia list — wszystkie bullety są na poziomie 0.
+ * Natomiast event.blocks zawiera rich_text_list z polem "indent" (0, 1, 2, ...)
+ * które poprawnie odzwierciedla nesting.
  * 
- * WIELE BLOKÓW:
- * [Create] [Deck: Art]
- * • Task graficzny
+ * STRUKTURA SLACK event.blocks:
+ * [{
+ *   type: "rich_text",
+ *   elements: [
+ *     { type: "rich_text_section", elements: [{ type: "text", text: "[Create] [Deck: X]" }] },
+ *     { type: "rich_text_list", style: "bullet", indent: 0, elements: [
+ *       { type: "rich_text_section", elements: [{ type: "text", text: "Task name (Owner)" }] }
+ *     ]},
+ *     { type: "rich_text_list", style: "bullet", indent: 1, elements: [
+ *       { type: "rich_text_section", elements: [{ type: "text", text: "Description line" }] }
+ *     ]},
+ *     { type: "rich_text_list", style: "bullet", indent: 2, elements: [
+ *       { type: "rich_text_section", elements: [{ type: "text", text: "Sub-bullet → '- ' in Codecks" }] }
+ *     ]}
+ *   ]
+ * }]
  * 
- * [Create] [Deck: Code]  
- * • Task programistyczny
- * 
- * POZIOMY WCIĘĆ:
- *   Poziom 0 (bullet bez wcięcia)     → Nowy task (tytuł)
- *   Poziom 1 (1x wcięcie)             → Opis / checkbox
- *   Poziom 2+ (2x+ wcięcie)           → "- tekst" w opisie / checkbox
+ * MAPPING:
+ *   indent 0 → Nowy task (tytuł)
+ *   indent 1 → Opis / checkbox
+ *   indent 2+ → "- tekst" w opisie / checkbox
  */
 
-// Wszystkie znaki bullet jakie Slack może wysłać
-const BULLET_CHARS = '•◦\\-\\*‣●○▪▸';
-const bulletRegex = new RegExp(`^(\\s*)([${BULLET_CHARS}])\\s+(.*)$`);
 const assigneeRegex = /\(([^)]+)\)\s*$/;
 const checkboxRegex = /^\[([xX\s]?)\]\s*(.*)$/;
 
 /**
- * Określa poziom wcięcia bulleta.
- * Slack jest nieprzewidywalny z whitespace, więc normalizujemy:
- *   0-1 spacji  → poziom 0 (tytuł taska)
- *   2-4 spacji  → poziom 1 (opis)
- *   5+ spacji   → poziom 2 (sub-bullet, "- " w opisie)
+ * Wyciąga tekst z elementów rich_text_section
+ * Obsługuje: text, link, emoji, user, channel
  */
-function getIndentLevel(indentLength) {
-    if (indentLength <= 1) return 0;
-    if (indentLength <= 4) return 1;
-    return 2;
+function extractText(elements) {
+    if (!elements || !Array.isArray(elements)) return '';
+    
+    return elements.map(el => {
+        switch (el.type) {
+            case 'text':
+                return el.text || '';
+            case 'link':
+                return el.text || el.url || '';
+            case 'emoji':
+                return el.unicode ? String.fromCodePoint(parseInt(el.unicode, 16)) : `:${el.name}:`;
+            case 'user':
+                return `<@${el.user_id}>`;
+            case 'channel':
+                return `<#${el.channel_id}>`;
+            default:
+                return el.text || '';
+        }
+    }).join('');
 }
 
 /**
- * Główna funkcja parsująca - zwraca tablicę bloków
+ * Główna funkcja parsująca — przyjmuje event.blocks i event.text
+ * Priorytet: blocks (rich_text) > text (fallback)
  */
-function parseTaskMessage(message) {
-    if (!message || typeof message !== 'string') {
+function parseTaskMessage(text, blocks) {
+    // Sprawdź czy wiadomość zawiera [Create]
+    const messageText = text || '';
+    if (!messageText.includes('[Create]')) {
         return { tasks: [], deckPath: null, blocks: [] };
     }
     
-    if (!message.includes('[Create]')) {
-        return { tasks: [], deckPath: null, blocks: [] };
+    // Preferuj blocks jeśli dostępne
+    if (blocks && Array.isArray(blocks) && blocks.length > 0) {
+        console.log('📦 Parser: używam event.blocks (rich_text)');
+        return parseFromBlocks(blocks);
     }
     
-    // Podziel na bloki [Create]
-    const blocks = splitIntoCreateBlocks(message);
-    
+    // Fallback do event.text
+    console.log('📝 Parser: fallback do event.text');
+    return parseFromText(messageText);
+}
+
+// ═══════════════════════════════════════════════════════════
+// PARSER Z event.blocks (GŁÓWNY)
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Parsuje rich_text blocks ze Slacka
+ */
+function parseFromBlocks(blocks) {
     const allTasks = [];
     let firstDeckPath = null;
     
     for (const block of blocks) {
-        const { tasks, deckPath } = parseCreateBlock(block);
+        if (block.type !== 'rich_text') continue;
         
-        if (firstDeckPath === null && deckPath) {
-            firstDeckPath = deckPath;
-        }
+        // Zbierz elementy bloku w płaską listę z indent info
+        const flatItems = flattenRichTextBlock(block);
         
-        for (const task of tasks) {
-            task.deckPath = deckPath;
-            allTasks.push(task);
+        // Podziel na sekcje [Create]
+        const createSections = splitByCreate(flatItems);
+        
+        for (const section of createSections) {
+            const { tasks, deckPath } = parseCreateSection(section);
+            
+            if (firstDeckPath === null && deckPath) {
+                firstDeckPath = deckPath;
+            }
+            
+            for (const task of tasks) {
+                task.deckPath = deckPath;
+                allTasks.push(task);
+            }
         }
     }
     
-    return { 
-        tasks: allTasks, 
+    return {
+        tasks: allTasks,
         deckPath: firstDeckPath,
-        blocks: blocks.map(b => parseCreateBlock(b))
+        blocks: []
     };
 }
 
 /**
- * Dzieli wiadomość na bloki [Create]
+ * Spłaszcza rich_text block do listy { text, indent, isList }
  */
-function splitIntoCreateBlocks(message) {
-    const blocks = [];
-    const lines = message.split('\n');
+function flattenRichTextBlock(block) {
+    const items = [];
     
-    let currentBlock = [];
-    let inBlock = false;
+    if (!block.elements) return items;
     
-    for (const line of lines) {
-        if (line.includes('[Create]')) {
-            if (currentBlock.length > 0) {
-                blocks.push(currentBlock.join('\n'));
+    for (const element of block.elements) {
+        if (element.type === 'rich_text_section') {
+            // Zwykły tekst (nie w liście)
+            const text = extractText(element.elements);
+            items.push({ text: text.trim(), indent: -1, isList: false });
+            
+        } else if (element.type === 'rich_text_list') {
+            const indent = element.indent || 0;
+            const style = element.style || 'bullet'; // bullet, ordered, checked, unchecked
+            
+            if (!element.elements) continue;
+            
+            for (const listItem of element.elements) {
+                if (listItem.type === 'rich_text_section') {
+                    const text = extractText(listItem.elements);
+                    items.push({ 
+                        text: text.trim(), 
+                        indent: indent, 
+                        isList: true,
+                        listStyle: style
+                    });
+                }
             }
-            currentBlock = [line];
-            inBlock = true;
-        } else if (inBlock) {
-            currentBlock.push(line);
         }
+        // Ignoruj rich_text_preformatted, rich_text_quote itp.
     }
     
-    if (currentBlock.length > 0) {
-        blocks.push(currentBlock.join('\n'));
-    }
-    
-    return blocks;
+    return items;
 }
 
 /**
- * Parsuje pojedynczy blok [Create]
- * Tylko format bullet-as-title.
+ * Dzieli flat items na sekcje po [Create]
  */
-function parseCreateBlock(blockText) {
-    const lines = blockText.split('\n');
+function splitByCreate(items) {
+    const sections = [];
+    let currentSection = null;
     
-    // Wyodrębnij deck path
+    for (const item of items) {
+        if (item.text.includes('[Create]')) {
+            if (currentSection) {
+                sections.push(currentSection);
+            }
+            currentSection = { createLine: item.text, items: [] };
+        } else if (currentSection) {
+            currentSection.items.push(item);
+        }
+    }
+    
+    if (currentSection) {
+        sections.push(currentSection);
+    }
+    
+    return sections;
+}
+
+/**
+ * Parsuje jedną sekcję [Create] z flat items
+ */
+function parseCreateSection(section) {
+    // Wyodrębnij deck path z linii [Create]
     let deckPath = null;
-    const deckMatch = blockText.match(/\[Deck:\s*([^\]]+)\]/i);
+    const deckMatch = section.createLine.match(/\[Deck:\s*([^\]]+)\]/i);
     if (deckMatch) {
         deckPath = deckMatch[1].trim();
     }
@@ -128,31 +198,23 @@ function parseCreateBlock(blockText) {
     const tasks = [];
     let currentTask = null;
     
-    // Parsuj linie (pomijamy pierwszą - to linia [Create])
-    for (let i = 1; i < lines.length; i++) {
-        const line = lines[i];
-        const trimmed = line.trim();
-        
-        if (trimmed === '') continue;
-        
-        const bulletMatch = line.match(bulletRegex);
-        
-        if (!bulletMatch) {
-            // Linia bez bulleta - ignoruj (meta linie, śmieci)
-            console.log(`⚠️ Parser: ignoruję linię bez bulleta: "${trimmed}"`);
+    for (const item of section.items) {
+        if (!item.isList) {
+            // Tekst poza listą — ignoruj
+            console.log(`⚠️ Parser: ignoruję tekst poza listą: "${item.text}"`);
             continue;
         }
         
-        const indent = bulletMatch[1].length;
-        const content = bulletMatch[3].trim();
-        const level = getIndentLevel(indent);
+        const indent = item.indent;
+        const content = item.text;
         
-        if (level === 0) {
+        if (!content) continue;
+        
+        if (indent === 0) {
             // ═══════════════════════════════════════
-            // POZIOM 0: Nowy task (tytuł)
+            // INDENT 0: Nowy task (tytuł)
             // ═══════════════════════════════════════
             
-            // Zapisz poprzedni task
             if (currentTask) {
                 tasks.push(currentTask);
             }
@@ -160,7 +222,6 @@ function parseCreateBlock(blockText) {
             let titleText = content;
             let assigneeName = null;
             
-            // Wyciągnij (Owner) z końca
             const aMatch = titleText.match(assigneeRegex);
             if (aMatch) {
                 assigneeName = aMatch[1].trim();
@@ -174,9 +235,9 @@ function parseCreateBlock(blockText) {
                 checkboxes: []
             };
             
-        } else if (level === 1 && currentTask) {
+        } else if (indent === 1 && currentTask) {
             // ═══════════════════════════════════════
-            // POZIOM 1: Opis lub checkbox
+            // INDENT 1: Opis lub checkbox
             // ═══════════════════════════════════════
             
             const cbMatch = content.match(checkboxRegex);
@@ -189,9 +250,9 @@ function parseCreateBlock(blockText) {
                 currentTask.description.push(content);
             }
             
-        } else if (level >= 2 && currentTask) {
+        } else if (indent >= 2 && currentTask) {
             // ═══════════════════════════════════════
-            // POZIOM 2+: "- tekst" w opisie lub checkbox
+            // INDENT 2+: "- tekst" w opisie lub checkbox
             // ═══════════════════════════════════════
             
             const cbMatch = content.match(checkboxRegex);
@@ -206,7 +267,6 @@ function parseCreateBlock(blockText) {
         }
     }
     
-    // Dodaj ostatni task
     if (currentTask) {
         tasks.push(currentTask);
     }
@@ -214,18 +274,139 @@ function parseCreateBlock(blockText) {
     return { tasks, deckPath };
 }
 
+// ═══════════════════════════════════════════════════════════
+// FALLBACK PARSER Z event.text
+// ═══════════════════════════════════════════════════════════
+
+// Wszystkie znaki bullet jakie Slack może wysłać
+const BULLET_CHARS = '•◦\\-\\*‣●○▪▸';
+const bulletRegex = new RegExp(`^(\\s*)([${BULLET_CHARS}])\\s+(.*)$`);
+
+/**
+ * Fallback: parsuje z event.text (gdy brak blocks)
+ * UWAGA: Slack spłaszcza wcięcia w event.text, więc ten parser
+ * może nie działać poprawnie z nested listami!
+ */
+function parseFromText(message) {
+    const blocks = splitIntoCreateBlocks(message);
+    
+    const allTasks = [];
+    let firstDeckPath = null;
+    
+    for (const block of blocks) {
+        const { tasks, deckPath } = parseCreateBlockText(block);
+        
+        if (firstDeckPath === null && deckPath) {
+            firstDeckPath = deckPath;
+        }
+        
+        for (const task of tasks) {
+            task.deckPath = deckPath;
+            allTasks.push(task);
+        }
+    }
+    
+    return { 
+        tasks: allTasks, 
+        deckPath: firstDeckPath,
+        blocks: []
+    };
+}
+
+function splitIntoCreateBlocks(message) {
+    const blocks = [];
+    const lines = message.split('\n');
+    let currentBlock = [];
+    let inBlock = false;
+    
+    for (const line of lines) {
+        if (line.includes('[Create]')) {
+            if (currentBlock.length > 0) blocks.push(currentBlock.join('\n'));
+            currentBlock = [line];
+            inBlock = true;
+        } else if (inBlock) {
+            currentBlock.push(line);
+        }
+    }
+    if (currentBlock.length > 0) blocks.push(currentBlock.join('\n'));
+    return blocks;
+}
+
+function parseCreateBlockText(blockText) {
+    const lines = blockText.split('\n');
+    
+    let deckPath = null;
+    const deckMatch = blockText.match(/\[Deck:\s*([^\]]+)\]/i);
+    if (deckMatch) deckPath = deckMatch[1].trim();
+    
+    const tasks = [];
+    let currentTask = null;
+    
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        if (trimmed === '') continue;
+        
+        const bulletMatch = line.match(bulletRegex);
+        if (!bulletMatch) {
+            console.log(`⚠️ Parser (text fallback): ignoruję linię: "${trimmed}"`);
+            continue;
+        }
+        
+        const indent = bulletMatch[1].length;
+        const content = bulletMatch[3].trim();
+        
+        // W text fallback, bez wcięć = zawsze level 0 (nowy task)
+        // To jest ograniczenie — Slack spłaszcza wcięcia
+        const level = indent <= 1 ? 0 : indent <= 4 ? 1 : 2;
+        
+        if (level === 0) {
+            if (currentTask) tasks.push(currentTask);
+            
+            let titleText = content;
+            let assigneeName = null;
+            const aMatch = titleText.match(assigneeRegex);
+            if (aMatch) {
+                assigneeName = aMatch[1].trim();
+                titleText = titleText.replace(assigneeRegex, '').trim();
+            }
+            currentTask = { title: titleText, assigneeName, description: [], checkboxes: [] };
+            
+        } else if (level === 1 && currentTask) {
+            const cbMatch = content.match(checkboxRegex);
+            if (cbMatch) {
+                currentTask.checkboxes.push({ text: cbMatch[2].trim(), checked: cbMatch[1].toLowerCase() === 'x' });
+            } else {
+                currentTask.description.push(content);
+            }
+        } else if (level >= 2 && currentTask) {
+            const cbMatch = content.match(checkboxRegex);
+            if (cbMatch) {
+                currentTask.checkboxes.push({ text: cbMatch[2].trim(), checked: cbMatch[1].toLowerCase() === 'x' });
+            } else {
+                currentTask.description.push('- ' + content);
+            }
+        }
+    }
+    
+    if (currentTask) tasks.push(currentTask);
+    return { tasks, deckPath };
+}
+
+// ═══════════════════════════════════════════════════════════
+// WSPÓLNE FUNKCJE
+// ═══════════════════════════════════════════════════════════
+
 /**
  * Buduje content karty dla Codecks
  */
 function buildCardContent(task) {
     let content = '';
     
-    // Description
     if (task.description && task.description.length > 0) {
         content += task.description.join('\n');
     }
     
-    // Checkboxy
     if (task.checkboxes && task.checkboxes.length > 0) {
         if (content) content += '\n';
         for (const checkbox of task.checkboxes) {
@@ -237,9 +418,6 @@ function buildCardContent(task) {
     return content;
 }
 
-/**
- * Normalizuje string do porównywania
- */
 function normalizeString(str) {
     return str
         .toLowerCase()
@@ -250,23 +428,12 @@ function normalizeString(str) {
         .trim();
 }
 
-/**
- * Sprawdza czy wiadomość zawiera komendę
- */
 function isCommand(message) {
-    if (!message || typeof message !== 'string') {
-        return false;
-    }
+    if (!message || typeof message !== 'string') return false;
     const trimmed = message.trim().toLowerCase();
-    return trimmed === '!help' || 
-           trimmed === '!commands' || 
-           trimmed === '!status' ||
-           trimmed === '!refresh';
+    return trimmed === '!help' || trimmed === '!commands' || trimmed === '!status' || trimmed === '!refresh';
 }
 
-/**
- * Zwraca odpowiedź na komendę
- */
 function getCommandResponse(message, cacheStats = null) {
     const trimmed = message.trim().toLowerCase();
     
@@ -298,7 +465,7 @@ function getCommandResponse(message, cacheStats = null) {
     }
     
     if (trimmed === '!help') {
-        return `🤖 *Jak używać Codecks Bot v5.0:*
+        return `🤖 *Jak używać Codecks Bot v5.1:*
 
 \`\`\`
 [Create] [Deck: Space/Deck]
@@ -335,20 +502,22 @@ function getCommandResponse(message, cacheStats = null) {
     return null;
 }
 
-/**
- * Sprawdza czy wiadomość zawiera [Create]
- */
 function hasCreateCommand(message) {
     return message && message.includes('[Create]');
 }
 
 module.exports = {
     parseTaskMessage,
-    parseCreateBlock,
-    splitIntoCreateBlocks,
+    parseFromBlocks,
+    parseFromText,
     buildCardContent,
     normalizeString,
     isCommand,
     getCommandResponse,
-    hasCreateCommand
+    hasCreateCommand,
+    // Eksport do testów
+    flattenRichTextBlock,
+    extractText,
+    splitByCreate,
+    parseCreateSection
 };
