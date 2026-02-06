@@ -1,26 +1,26 @@
 /**
  * Dynamic Mapping Cache v4.0
  * 
- * Pobiera z Codecks API i cachuje: nazwa → UUID
- * Obsługuje:
+ * Fetches from Codecks API and caches: name → UUID
+ * Handles:
  * - Spaces (Projects)
- * - Decks (z powiązaniem do Space)
+ * - Decks (with Space association)
  * - Users
  * 
  * Mappingi (SPACE_MAPPING, DECK_MAPPING, USER_MAPPING) to teraz tylko aliasy:
- * - Klucz = skrót używany w Slacku
- * - Wartość = pełna nazwa w Codecks
- * - Pusty mapping {} = szuka bezpośrednio po nazwie
+ * - Key = shortcut used in Slack
+ * - Value = full name in Codecks
+ * - Empty mapping {} = searches by name directly
  */
 
 class MappingCache {
     constructor() {
-        // Cache: nazwa (lowercase) → UUID
+        // Cache: name (lowercase) → UUID
         this.spaces = new Map();      // "ma txa" → "uuid-space"
         this.decks = new Map();       // "backlog" → { id: "uuid", spaceId: "uuid-space", spaceName: "MA TXA" }
         this.users = new Map();       // "tobiasz" → "uuid-user"
         
-        // Reverse cache: UUID → nazwa (dla debugowania)
+        // Reverse cache: UUID → name (for debugging)
         this.spaceNames = new Map();  // "uuid" → "MA TXA"
         this.deckNames = new Map();   // "uuid" → "Backlog"
         this.userNames = new Map();   // "uuid" → "Tobiasz"
@@ -37,7 +37,7 @@ class MappingCache {
      * Inicjalizuje cache - pobiera wszystkie dane z Codecks API
      */
     async initialize(codecksClient) {
-        console.log('🔄 Inicjalizacja cache mappingów...');
+        console.log('[Cache] Initializing...');
         
         try {
             // Pobierz spaces (projects)
@@ -52,15 +52,15 @@ class MappingCache {
             this.initialized = true;
             this.lastRefresh = new Date();
             
-            console.log(`✅ Cache zainicjalizowany:`);
-            console.log(`   📂 Spaces: ${this.spaces.size}`);
-            console.log(`   🎴 Decks: ${this.decks.size}`);
-            console.log(`   👥 Users: ${this.users.size}`);
+            console.log('[Cache] Ready:');
+            console.log(`  Spaces: ${this.spaces.size}`);
+            console.log(`  Decks: ${this.decks.size}`);
+            console.log(`  Users: ${this.users.size}`);
             
             return true;
             
         } catch (error) {
-            console.error('❌ Błąd inicjalizacji cache:', error.message);
+            console.error('[Cache] Init error:', error.message);
             throw error;
         }
     }
@@ -83,11 +83,11 @@ class MappingCache {
             }
         }
         
-        console.log(`   📂 Załadowano ${this.spaces.size} space(ów)`);
+        console.log(`[Cache] Loaded ${this.spaces.size} spaces`);
     }
     
     /**
-     * Pobiera i cachuje decks (z powiązaniem do spaces)
+     * Fetches and caches decks (with space association)
      */
     async loadDecks(codecksClient) {
         const decksData = await codecksClient.listDecksWithSpaces();
@@ -101,10 +101,10 @@ class MappingCache {
             if (name && deck.id) {
                 const normalizedName = this.normalize(name);
                 
-                // Obsłuż różne formaty project:
-                // - deck.project może być obiektem {id, name}
-                // - deck.project może być stringiem (ID)
-                // - deck.projectId może być stringiem (ID) z naszego mapowania
+                // Handle various project formats:
+                // - deck.project can be an object {id, name}
+                // - deck.project can be a string (ID)
+                // - deck.projectId can be a string (ID)
                 let projectId = null;
                 let spaceName = null;
                 
@@ -131,17 +131,17 @@ class MappingCache {
                     spaceName: spaceName
                 };
                 
-                // Jeśli deck o tej nazwie już istnieje, użyj ścieżki space/deck
+                // If deck name already exists, use full space/deck path
                 if (this.decks.has(normalizedName)) {
-                    // Deck z tą samą nazwą w innym space - nie nadpisuj
-                    // Użytkownik musi użyć pełnej ścieżki
+                    // Same name in different space — keep first, require full path
+                    
                 } else {
                     this.decks.set(normalizedName, deckInfo);
                 }
                 
                 this.deckNames.set(deck.id, name);
                 
-                // Pełna ścieżka space/deck
+                // Full space/deck path
                 if (spaceName) {
                     const fullPath = this.normalize(`${spaceName}/${name}`);
                     this.deckPaths.set(fullPath, deck.id);
@@ -149,7 +149,7 @@ class MappingCache {
             }
         }
         
-        console.log(`   🎴 Załadowano ${this.decks.size} deck(ów), ${this.deckPaths.size} ścieżek`);
+        console.log(`[Cache] Loaded ${this.decks.size} decks, ${this.deckPaths.size} paths`);
     }
     
     /**
@@ -168,33 +168,33 @@ class MappingCache {
                 this.users.set(normalizedName, user.id);
                 this.userNames.set(user.id, name);
                 
-                // Dodaj też username jeśli inny niż nickname
+                // Also add username if different from nickname
                 if (user.username && user.username !== name) {
                     this.users.set(this.normalize(user.username), user.id);
                 }
             }
         }
         
-        console.log(`   👥 Załadowano ${this.users.size} user(ów)`);
+        console.log(`[Cache] Loaded ${this.users.size} users`);
     }
     
     /**
-     * Odświeża cache
+     * Refreshes cache
      */
     async refresh(codecksClient) {
-        console.log('🔄 Odświeżanie cache...');
+        console.log('[Cache] Refreshing...');
         return this.initialize(codecksClient);
     }
     
     /**
      * Resolvuje Space name do UUID
      * @param {string} input - nazwa ze Slacka lub alias
-     * @param {object} aliasMapping - SPACE_MAPPING (alias → pełna nazwa)
+     * @param {object} aliasMapping - SPACE_MAPPING (alias → full name)
      */
     resolveSpace(input, aliasMapping = {}) {
         if (!input) return null;
         
-        // 1. Sprawdź alias
+        // 1. Check alias
         const resolvedName = this.resolveAlias(input, aliasMapping);
         
         // 2. Szukaj w cache
@@ -202,39 +202,39 @@ class MappingCache {
         const spaceId = this.spaces.get(normalized);
         
         if (spaceId) {
-            console.log(`   📂 Space: "${input}" → "${resolvedName}" → ${spaceId}`);
+            console.log(`[Resolve] Space: ${input} → ${spaceId}`);
             return spaceId;
         }
         
-        console.log(`   ⚠️ Space nie znaleziony: "${input}"`);
+        console.warn(`[Resolve] Space not found: ${input}`);
         return null;
     }
     
     /**
      * Resolvuje Deck name do UUID
-     * @param {string} input - nazwa ze Slacka (może być "deck" lub "space/deck")
-     * @param {object} aliasMapping - DECK_MAPPING (alias → pełna nazwa)
-     * @param {object} spaceAliasMapping - SPACE_MAPPING (dla resolvowania space w ścieżce)
+     * @param {string} input - name from Slack (can be "deck" or "space/deck")
+     * @param {object} aliasMapping - DECK_MAPPING (alias → full name)
+     * @param {object} spaceAliasMapping - SPACE_MAPPING (for resolving space in path)
      */
     resolveDeck(input, aliasMapping = {}, spaceAliasMapping = {}) {
         if (!input) return null;
         
-        // 1. Sprawdź alias dla całej ścieżki
+        // 1. Check alias for full path
         let resolvedPath = this.resolveAlias(input, aliasMapping);
         
-        // 2. Sprawdź czy to ścieżka space/deck
+        // 2. Check if space/deck path
         if (resolvedPath.includes('/')) {
             const [spacePart, deckPart] = resolvedPath.split('/').map(s => s.trim());
             
             // Resolvuj space alias
             const resolvedSpace = this.resolveAlias(spacePart, spaceAliasMapping);
             
-            // Szukaj po pełnej ścieżce
+            // Look up full path
             const fullPath = this.normalize(`${resolvedSpace}/${deckPart}`);
             const deckId = this.deckPaths.get(fullPath);
             
             if (deckId) {
-                console.log(`   🎴 Deck: "${input}" → "${resolvedSpace}/${deckPart}" → ${deckId}`);
+                console.log(`[Resolve] Deck: ${input} → ${deckId}`);
                 return deckId;
             }
             
@@ -243,7 +243,7 @@ class MappingCache {
             const deckInfo = this.decks.get(normalized);
             
             if (deckInfo) {
-                console.log(`   🎴 Deck (fallback): "${deckPart}" → ${deckInfo.id}`);
+                console.log(`[Resolve] Deck (fallback): ${deckPart} → ${deckInfo.id}`);
                 return deckInfo.id;
             }
         } else {
@@ -252,24 +252,24 @@ class MappingCache {
             const deckInfo = this.decks.get(normalized);
             
             if (deckInfo) {
-                console.log(`   🎴 Deck: "${input}" → "${resolvedPath}" → ${deckInfo.id}`);
+                console.log(`[Resolve] Deck: ${input} → ${deckInfo.id}`);
                 return deckInfo.id;
             }
         }
         
-        console.log(`   ⚠️ Deck nie znaleziony: "${input}"`);
+        console.warn(`[Resolve] Deck not found: ${input}`);
         return null;
     }
     
     /**
      * Resolvuje User name do UUID
      * @param {string} input - nazwa ze Slacka lub alias
-     * @param {object} aliasMapping - USER_MAPPING (alias → pełna nazwa)
+     * @param {object} aliasMapping - USER_MAPPING (alias → full name)
      */
     resolveUser(input, aliasMapping = {}) {
         if (!input) return null;
         
-        // 1. Sprawdź alias
+        // 1. Check alias
         const resolvedName = this.resolveAlias(input, aliasMapping);
         
         // 2. Szukaj w cache
@@ -277,24 +277,24 @@ class MappingCache {
         const userId = this.users.get(normalized);
         
         if (userId) {
-            console.log(`   👤 User: "${input}" → "${resolvedName}" → ${userId}`);
+            console.log(`[Resolve] User: ${input} → ${userId}`);
             return userId;
         }
         
-        // 3. Fuzzy matching - szukaj częściowego dopasowania
+        // 3. Fuzzy matching — partial name match
         for (const [name, id] of this.users.entries()) {
             if (name.includes(normalized) || normalized.includes(name)) {
-                console.log(`   👤 User (fuzzy): "${input}" → ${name} → ${id}`);
+                console.log(`[Resolve] User (fuzzy): ${input} → ${id}`);
                 return id;
             }
         }
         
-        console.log(`   ⚠️ User nie znaleziony: "${input}"`);
+        console.warn(`[Resolve] User not found: ${input}`);
         return null;
     }
     
     /**
-     * Resolvuje alias do pełnej nazwy
+     * Resolves alias to full name
      */
     resolveAlias(input, aliasMapping = {}) {
         if (!input) return input;
@@ -308,19 +308,19 @@ class MappingCache {
             }
         }
         
-        // Brak aliasu - zwróć oryginał
+        // No alias — return original
         return input;
     }
     
     /**
-     * Normalizuje string do porównywania
+     * Normalizes string for comparison
      */
     normalize(str) {
         if (!str) return '';
         return str
             .toLowerCase()
             .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')  // Usuń akcenty
+            .replace(/[\u0300-\u036f]/g, '')  // Remove diacritics
             .replace(/ł/g, 'l')
             .replace(/Ł/g, 'l')
             .trim();
@@ -341,7 +341,7 @@ class MappingCache {
     }
     
     /**
-     * Zwraca listę wszystkich spaces (do debugowania)
+     * Returns all spaces (for debugging)
      */
     listSpaces() {
         const result = [];
@@ -352,7 +352,7 @@ class MappingCache {
     }
     
     /**
-     * Zwraca listę wszystkich decks (do debugowania)
+     * Returns all decks (for debugging)
      */
     listDecks() {
         const result = [];
@@ -367,7 +367,7 @@ class MappingCache {
     }
     
     /**
-     * Zwraca listę wszystkich users (do debugowania)
+     * Returns all users (for debugging)
      */
     listUsers() {
         const result = [];

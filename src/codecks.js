@@ -2,9 +2,9 @@
  * Klient API Codecks v4.0.3
  * 
  * NAPRAWIONE na podstawie debug:
- * - users: pobierane przez ROLES (bezpośredni dostęp zwraca 500!)
- * - projects: id, name ✅
- * - decks: id, title ✅
+ * - users: fetched via ROLES (direct access returns 500!)
+ * - projects: id, name
+ * - decks: id, title
  */
 
 class CodecksClient {
@@ -39,7 +39,7 @@ class CodecksClient {
     }
     
     /**
-     * Tworzy nową kartę
+     * Creates a new card
      */
     async createCard(cardData) {
         const payload = {
@@ -58,7 +58,7 @@ class CodecksClient {
     }
     
     /**
-     * Pobiera listę decków
+     * Lists decks
      */
     async listDecks() {
         const query = {
@@ -76,7 +76,7 @@ class CodecksClient {
     }
     
     /**
-     * Pobiera listę decków z projektem
+     * Lists decks with project info
      */
     async listDecksWithSpaces() {
         const query = {
@@ -98,8 +98,8 @@ class CodecksClient {
     }
     
     /**
-     * Pobiera listę użytkowników PRZEZ ROLES
-     * (bezpośredni dostęp do users zwraca 500!)
+     * Lists users via ROLES query
+     * (direct user access returns 500)
      */
     async listUsers() {
         const query = {
@@ -120,7 +120,7 @@ class CodecksClient {
     }
     
     /**
-     * Pobiera listę projektów (spaces)
+     * Lists projects (spaces)
      */
     async listProjects() {
         const query = {
@@ -138,7 +138,7 @@ class CodecksClient {
     }
     
     /**
-     * Pobiera szczegóły konta
+     * Gets account details
      */
     async getAccountInfo() {
         const query = {
@@ -151,7 +151,7 @@ class CodecksClient {
         
         const result = await this.request('/', query);
         
-        // Parsuj odpowiedź
+        // Parse response
         if (result.account) {
             const accountId = result._root?.account;
             if (accountId && result.account[accountId]) {
@@ -194,7 +194,7 @@ class CodecksClient {
         
         if (result.deck) {
             for (const [id, data] of Object.entries(result.deck)) {
-                // Znajdź projekt
+                // Find project
                 let projectId = data.project;
                 let projectName = null;
                 
@@ -259,18 +259,18 @@ class CodecksClient {
     }
     
     /**
-     * Testuje połączenie
+     * Tests the connection
      */
     async testConnection() {
         try {
             const account = await this.getAccountInfo();
             if (account) {
-                console.log(`✅ Połączenie z Codecks OK: ${account.name || this.subdomain}`);
+                console.log(`[Codecks] Connected: ${account.name || this.subdomain}`);
                 return true;
             }
             return false;
         } catch (error) {
-            console.error(`❌ Błąd połączenia z Codecks: ${error.message}`);
+            console.error(`[Codecks] Connection failed: ${error.message}`);
             return false;
         }
     }

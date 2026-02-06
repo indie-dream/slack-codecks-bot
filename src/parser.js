@@ -1,343 +1,232 @@
 /**
- * Parser wiadomości Slack v5.2
- * 
- * CZYTA event.blocks (rich_text) zamiast event.text!
- * 
- * FORMAT WIADOMOŚCI:
- * 
- * [Create] [Deck: Space/Deck]
- * 
- * Tomek:                              ← Owner (plain text, nie bullet)
- * • Task 1                            ← indent 0 = nowy task
- *    • Opis linia 1                   ← indent 1 = opis
- *    • [ ] Checkbox                   ← indent 1 = checkbox
- *       • Sub-bullet                  ← indent 2 = "- " w opisie
- *    • Następna linia opisu           ← indent 1 (po indent 2 → \n\n separator)
- * • Task 2                            ← indent 0 = kolejny task Tomka
- * 
- * Tobiasz:                            ← Nowy owner
- * • Task 3                            ← indent 0 = task Tobiasza
- *    • Opis
- * 
- * OWNER FORMATY (plain text, nie w liście):
- *   "Tomek:"     → owner = "Tomek"
- *   "Tomek"      → owner = "Tomek"  (bez dwukropka też działa)
- * 
- * FORMATOWANIE W CODECKS:
- *   indent 0 → tytuł karty (pierwsza linia content)
- *   indent 1 → linia opisu
- *   indent 2 → "- tekst" w opisie
- *   Gdy po indent 2 wraca indent 1 → dodaj \n\n (pustą linię) przed
+ * Slack Message Parser v5.3
+ *
+ * Reads event.blocks (rich_text) to preserve indent levels.
+ * Falls back to event.text when blocks aren't available.
+ *
+ * Supported message formats:
+ *
+ *   [Create] [Deck: Space/Deck]
+ *   Owner:
+ *   • Task title          (indent 0 → card title)
+ *      • Description       (indent 1 → card body)
+ *         • Sub-bullet     (indent 2 → "- text" in body)
+ *      • [ ] Checkbox      (indent 1 → checkbox)
+ *   • Next task
+ *
+ * Both "•" (Slack bullet list) and "- " (plain text dash) are recognized.
+ * Owner can be "Name:" or just "Name" on its own line before tasks.
+ * Inline "(Owner)" at end of bullet also works and overrides header.
  */
 
 const assigneeRegex = /\(([^)]+)\)\s*$/;
 const checkboxRegex = /^\[([xX\s]?)\]\s*(.*)$/;
-// Regex: "Imię:" lub "Imię Nazwisko:" — tekst kończący się na ":"
-const ownerHeaderRegex = /^(.+?):?\s*$/;
+const textBulletRegex = /^(\s*)([-•◦*‣])\s+(.+)$/;
 
-/**
- * Wyciąga tekst z elementów rich_text_section
- */
+// --- Text extraction from rich_text elements ---
+
 function extractText(elements) {
     if (!elements || !Array.isArray(elements)) return '';
-    
     return elements.map(el => {
         switch (el.type) {
-            case 'text':
-                return el.text || '';
-            case 'link':
-                return el.text || el.url || '';
-            case 'emoji':
-                return el.unicode ? String.fromCodePoint(parseInt(el.unicode, 16)) : `:${el.name}:`;
-            case 'user':
-                return `<@${el.user_id}>`;
-            case 'channel':
-                return `<#${el.channel_id}>`;
-            default:
-                return el.text || '';
+            case 'text':    return el.text || '';
+            case 'link':    return el.text || el.url || '';
+            case 'emoji':   return el.unicode ? String.fromCodePoint(parseInt(el.unicode, 16)) : `:${el.name}:`;
+            case 'user':    return `<@${el.user_id}>`;
+            case 'channel': return `<#${el.channel_id}>`;
+            default:        return el.text || '';
         }
     }).join('');
 }
 
-/**
- * Główna funkcja parsująca — przyjmuje event.text i event.blocks
- */
+// --- Main entry point ---
+
 function parseTaskMessage(text, blocks) {
     const messageText = text || '';
     if (!messageText.includes('[Create]')) {
         return { tasks: [], deckPath: null, blocks: [] };
     }
-    
+
     if (blocks && Array.isArray(blocks) && blocks.length > 0) {
-        console.log('📦 Parser: używam event.blocks (rich_text)');
         return parseFromBlocks(blocks);
     }
-    
-    console.log('📝 Parser: fallback do event.text');
+
     return parseFromText(messageText);
 }
 
-// ═══════════════════════════════════════════════════════════
-// PARSER Z event.blocks (GŁÓWNY)
-// ═══════════════════════════════════════════════════════════
+// ============================================================
+// Block-based parser (primary — reads event.blocks)
+// ============================================================
 
 function parseFromBlocks(blocks) {
     const allTasks = [];
     let firstDeckPath = null;
-    
+
     for (const block of blocks) {
         if (block.type !== 'rich_text') continue;
-        
+
         const flatItems = flattenRichTextBlock(block);
         const createSections = splitByCreate(flatItems);
-        
+
         for (const section of createSections) {
             const { tasks, deckPath } = parseCreateSection(section);
-            
-            if (firstDeckPath === null && deckPath) {
-                firstDeckPath = deckPath;
-            }
-            
+            if (firstDeckPath === null && deckPath) firstDeckPath = deckPath;
             for (const task of tasks) {
                 task.deckPath = deckPath;
                 allTasks.push(task);
             }
         }
     }
-    
+
+    console.log(`[Parser] Parsed ${allTasks.length} task(s) from blocks`);
     return { tasks: allTasks, deckPath: firstDeckPath, blocks: [] };
 }
 
 /**
- * Regex do rozpoznawania bullet/dash linii w plain text
- * Matchuje: "- tekst", "  - tekst", "• tekst", "   • tekst" itp.
- */
-const textBulletRegex = /^(\s*)([-•◦*‣])\s+(.+)$/;
-
-/**
- * Spłaszcza rich_text block do listy { text, indent, isList }
- * 
- * Obsługuje DWA formaty:
- * 1. rich_text_list (Slack bullety z •) → isList=true, indent z API
- * 2. rich_text_section z "- tekst" w plain text → parsowane jako pseudo-list
+ * Flattens a rich_text block into a list of { text, indent, isList } items.
+ * Handles both rich_text_list (Slack bullet UI) and plain text with "- " dashes.
  */
 function flattenRichTextBlock(block) {
     const items = [];
     if (!block.elements) return items;
-    
+
     for (const element of block.elements) {
         if (element.type === 'rich_text_section') {
-            const text = extractText(element.elements);
-            const trimmed = text.trim();
-            
-            // Sprawdź czy to wieloliniowy tekst z dash-listą
-            // Slack może wysłać cały blok "Owner:\n- task1\n- task2" jako jeden section
-            // LUB osobne sections per linia
-            const lines = trimmed.split('\n');
-            
-            for (const line of lines) {
-                const lineTrimmed = line.trim();
-                if (!lineTrimmed) continue;
-                
-                const bulletMatch = line.match(textBulletRegex);
-                
-                if (bulletMatch) {
-                    // To jest "- tekst" lub "  - tekst" → traktuj jako list item
-                    const spaces = bulletMatch[1].length;
-                    const content = bulletMatch[3].trim();
-                    // Mapuj wcięcia: 0-1 spacji → indent 0, 2-4 → indent 1, 5+ → indent 2
+            const text = extractText(element.elements).trim();
+            for (const line of text.split('\n')) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+
+                const m = line.match(textBulletRegex);
+                if (m) {
+                    const spaces = m[1].length;
                     const indent = spaces <= 1 ? 0 : spaces <= 4 ? 1 : 2;
-                    items.push({ text: content, indent, isList: true, listStyle: 'bullet' });
+                    items.push({ text: m[3].trim(), indent, isList: true, listStyle: 'bullet' });
                 } else {
-                    // Zwykły tekst (owner header, [Create], etc.)
-                    items.push({ text: lineTrimmed, indent: -1, isList: false });
+                    items.push({ text: trimmed, indent: -1, isList: false });
                 }
             }
-            
+
         } else if (element.type === 'rich_text_list') {
             const indent = element.indent || 0;
             const style = element.style || 'bullet';
-            
             if (!element.elements) continue;
-            
-            for (const listItem of element.elements) {
-                if (listItem.type === 'rich_text_section') {
-                    const text = extractText(listItem.elements);
-                    items.push({ text: text.trim(), indent, isList: true, listStyle: style });
+
+            for (const li of element.elements) {
+                if (li.type === 'rich_text_section') {
+                    items.push({ text: extractText(li.elements).trim(), indent, isList: true, listStyle: style });
                 }
             }
         }
     }
-    
+
     return items;
 }
 
-/**
- * Dzieli flat items na sekcje po [Create]
- */
+/** Splits flat items into sections, one per [Create] command. */
 function splitByCreate(items) {
     const sections = [];
-    let currentSection = null;
-    
+    let cur = null;
+
     for (const item of items) {
         if (item.text.includes('[Create]')) {
-            if (currentSection) sections.push(currentSection);
-            currentSection = { createLine: item.text, items: [] };
-        } else if (currentSection) {
-            currentSection.items.push(item);
+            if (cur) sections.push(cur);
+            cur = { createLine: item.text, items: [] };
+        } else if (cur) {
+            cur.items.push(item);
         }
     }
-    
-    if (currentSection) sections.push(currentSection);
+
+    if (cur) sections.push(cur);
     return sections;
 }
 
-/**
- * Sprawdza czy tekst wygląda jak nagłówek ownera.
- * Np. "Tomek:", "Tobiasz", "Anna Kowalska:"
- * Musi być plain text (nie w liście) i nie zawierać [Create]/[Deck:]
- */
+// --- Owner header detection ---
+
 function isOwnerHeader(text) {
-    if (!text) return false;
-    // Nie może zawierać tagów
-    if (text.includes('[') || text.includes(']')) return false;
-    // Nie może być pusty po trimie
-    const trimmed = text.trim();
-    if (!trimmed) return false;
-    // Nie może być za długi (max ~50 znaków na imię)
-    if (trimmed.length > 50) return false;
-    // Powinien wyglądać jak imię (nie zawiera specjalnych znaków poza : i spacjami)
-    // Akceptujemy: litery, spacje, dwukropek na końcu, polskie znaki
-    return /^[\p{L}\p{M}\s.'-]+:?\s*$/u.test(trimmed);
+    if (!text || text.includes('[') || text.includes(']')) return false;
+    const t = text.trim();
+    if (!t || t.length > 50) return false;
+    return /^[\p{L}\p{M}\s.'-]+:?\s*$/u.test(t);
 }
 
-/**
- * Wyciąga imię ownera z nagłówka
- * "Tomek:" → "Tomek"
- * "Tomek"  → "Tomek"
- * "Anna Kowalska:" → "Anna Kowalska"
- */
 function extractOwnerName(text) {
     return text.trim().replace(/:+\s*$/, '').trim();
 }
 
-/**
- * Parsuje jedną sekcję [Create] z flat items
- */
+// --- Section parser (shared logic) ---
+
 function parseCreateSection(section) {
     let deckPath = null;
-    const deckMatch = section.createLine.match(/\[Deck:\s*([^\]]+)\]/i);
-    if (deckMatch) {
-        deckPath = deckMatch[1].trim();
-    }
-    
+    const dm = section.createLine.match(/\[Deck:\s*([^\]]+)\]/i);
+    if (dm) deckPath = dm[1].trim();
+
     const tasks = [];
     let currentTask = null;
-    let currentOwner = null;   // Aktualny owner z nagłówka
-    let lastIndent = -1;       // Ostatni indent (do wykrywania powrotu z indent 2 → 1)
-    
+    let currentOwner = null;
+    let lastIndent = -1;
+
     for (const item of section.items) {
-        
-        // ═══════════════════════════════════════
-        // PLAIN TEXT (nie w liście) → sprawdź czy to owner header
-        // ═══════════════════════════════════════
+
+        // Plain text → check if it's an owner header
         if (!item.isList) {
             if (isOwnerHeader(item.text)) {
-                // Zapisz poprzedni task
-                if (currentTask) {
-                    tasks.push(currentTask);
-                    currentTask = null;
-                }
+                if (currentTask) { tasks.push(currentTask); currentTask = null; }
                 currentOwner = extractOwnerName(item.text);
                 lastIndent = -1;
-                console.log(`👤 Parser: Owner header: "${currentOwner}"`);
-            } else if (item.text) {
-                console.log(`⚠️ Parser: ignoruję tekst poza listą: "${item.text}"`);
             }
             continue;
         }
-        
-        const indent = item.indent;
-        const content = item.text;
+
+        const { indent, text: content } = item;
         if (!content) continue;
-        
+
         if (indent === 0) {
-            // ═══════════════════════════════════════
-            // INDENT 0: Nowy task (tytuł)
-            // ═══════════════════════════════════════
-            
-            if (currentTask) {
-                tasks.push(currentTask);
+            // New task (title)
+            if (currentTask) tasks.push(currentTask);
+
+            let title = content;
+            let assignee = currentOwner;
+            const am = title.match(assigneeRegex);
+            if (am) {
+                assignee = am[1].trim();
+                title = title.replace(assigneeRegex, '').trim();
             }
-            
-            let titleText = content;
-            let assigneeName = currentOwner; // Domyślnie z nagłówka
-            
-            // Sprawdź (Owner) w samym bullecie — nadpisuje nagłówek
-            const aMatch = titleText.match(assigneeRegex);
-            if (aMatch) {
-                assigneeName = aMatch[1].trim();
-                titleText = titleText.replace(assigneeRegex, '').trim();
-            }
-            
-            currentTask = {
-                title: titleText,
-                assigneeName: assigneeName,
-                description: [],
-                checkboxes: []
-            };
+
+            currentTask = { title, assigneeName: assignee, description: [], checkboxes: [] };
             lastIndent = 0;
-            
+
         } else if (indent === 1 && currentTask) {
-            // ═══════════════════════════════════════
-            // INDENT 1: Opis lub checkbox
-            // Jeśli poprzedni indent był 2+ → dodaj \n\n separator
-            // ═══════════════════════════════════════
-            
-            if (lastIndent >= 2) {
-                // Powrót z głębszego poziomu → pusta linia w opisie
-                currentTask.description.push('');
-            }
-            
-            const cbMatch = content.match(checkboxRegex);
-            if (cbMatch) {
-                currentTask.checkboxes.push({
-                    text: cbMatch[2].trim(),
-                    checked: cbMatch[1].toLowerCase() === 'x'
-                });
+            // Description or checkbox; insert blank line when returning from deeper indent
+            if (lastIndent >= 2) currentTask.description.push('');
+
+            const cm = content.match(checkboxRegex);
+            if (cm) {
+                currentTask.checkboxes.push({ text: cm[2].trim(), checked: cm[1].toLowerCase() === 'x' });
             } else {
                 currentTask.description.push(content);
             }
             lastIndent = 1;
-            
+
         } else if (indent >= 2 && currentTask) {
-            // ═══════════════════════════════════════
-            // INDENT 2+: "- tekst" w opisie lub checkbox
-            // ═══════════════════════════════════════
-            
-            const cbMatch = content.match(checkboxRegex);
-            if (cbMatch) {
-                currentTask.checkboxes.push({
-                    text: cbMatch[2].trim(),
-                    checked: cbMatch[1].toLowerCase() === 'x'
-                });
+            // Sub-bullet → prefixed with "- " in card body
+            const cm = content.match(checkboxRegex);
+            if (cm) {
+                currentTask.checkboxes.push({ text: cm[2].trim(), checked: cm[1].toLowerCase() === 'x' });
             } else {
                 currentTask.description.push('- ' + content);
             }
             lastIndent = indent;
         }
     }
-    
-    if (currentTask) {
-        tasks.push(currentTask);
-    }
-    
+
+    if (currentTask) tasks.push(currentTask);
     return { tasks, deckPath };
 }
 
-// ═══════════════════════════════════════════════════════════
-// FALLBACK PARSER Z event.text
-// ═══════════════════════════════════════════════════════════
+// ============================================================
+// Text-based parser (fallback — reads event.text)
+// ============================================================
 
 const BULLET_CHARS = '•◦\\-\\*‣●○▪▸';
 const bulletRegex = new RegExp(`^(\\s*)([${BULLET_CHARS}])\\s+(.*)$`);
@@ -347,7 +236,7 @@ function parseFromText(message) {
     const blocks = splitIntoCreateBlocks(message);
     const allTasks = [];
     let firstDeckPath = null;
-    
+
     for (const block of blocks) {
         const { tasks, deckPath } = parseCreateBlockText(block);
         if (firstDeckPath === null && deckPath) firstDeckPath = deckPath;
@@ -356,209 +245,213 @@ function parseFromText(message) {
             allTasks.push(task);
         }
     }
-    
+
+    console.log(`[Parser] Parsed ${allTasks.length} task(s) from text fallback`);
     return { tasks: allTasks, deckPath: firstDeckPath, blocks: [] };
 }
 
 function splitIntoCreateBlocks(message) {
     const blocks = [];
     const lines = message.split('\n');
-    let currentBlock = [];
-    let inBlock = false;
-    
+    let cur = [];
+    let active = false;
+
     for (const line of lines) {
         if (line.includes('[Create]')) {
-            if (currentBlock.length > 0) blocks.push(currentBlock.join('\n'));
-            currentBlock = [line];
-            inBlock = true;
-        } else if (inBlock) {
-            currentBlock.push(line);
+            if (cur.length > 0) blocks.push(cur.join('\n'));
+            cur = [line];
+            active = true;
+        } else if (active) {
+            cur.push(line);
         }
     }
-    if (currentBlock.length > 0) blocks.push(currentBlock.join('\n'));
+    if (cur.length > 0) blocks.push(cur.join('\n'));
     return blocks;
 }
 
 function parseCreateBlockText(blockText) {
     const lines = blockText.split('\n');
-    
+
     let deckPath = null;
-    const deckMatch = blockText.match(/\[Deck:\s*([^\]]+)\]/i);
-    if (deckMatch) deckPath = deckMatch[1].trim();
-    
+    const dm = blockText.match(/\[Deck:\s*([^\]]+)\]/i);
+    if (dm) deckPath = dm[1].trim();
+
     const tasks = [];
     let currentTask = null;
     let currentOwner = null;
     let lastIndent = -1;
-    
+
     for (let i = 1; i < lines.length; i++) {
         const line = lines[i];
         const trimmed = line.trim();
-        if (trimmed === '') continue;
-        
-        const bulletMatch = line.match(bulletRegex);
-        
-        if (!bulletMatch) {
-            // Sprawdź czy to owner header
+        if (!trimmed) continue;
+
+        const bm = line.match(bulletRegex);
+
+        if (!bm) {
             if (textOwnerRegex.test(trimmed) && !trimmed.includes('[')) {
                 if (currentTask) { tasks.push(currentTask); currentTask = null; }
                 currentOwner = trimmed.replace(/:+\s*$/, '').trim();
                 lastIndent = -1;
-                console.log(`👤 Parser (text): Owner header: "${currentOwner}"`);
-            } else {
-                console.log(`⚠️ Parser (text fallback): ignoruję linię: "${trimmed}"`);
             }
             continue;
         }
-        
-        const indent = bulletMatch[1].length;
-        const content = bulletMatch[3].trim();
+
+        const indent = bm[1].length;
+        const content = bm[3].trim();
         const level = indent <= 1 ? 0 : indent <= 4 ? 1 : 2;
-        
+
         if (level === 0) {
             if (currentTask) tasks.push(currentTask);
-            
-            let titleText = content;
-            let assigneeName = currentOwner;
-            const aMatch = titleText.match(assigneeRegex);
-            if (aMatch) {
-                assigneeName = aMatch[1].trim();
-                titleText = titleText.replace(assigneeRegex, '').trim();
-            }
-            currentTask = { title: titleText, assigneeName, description: [], checkboxes: [] };
+            let title = content;
+            let assignee = currentOwner;
+            const am = title.match(assigneeRegex);
+            if (am) { assignee = am[1].trim(); title = title.replace(assigneeRegex, '').trim(); }
+            currentTask = { title, assigneeName: assignee, description: [], checkboxes: [] };
             lastIndent = 0;
-            
+
         } else if (level === 1 && currentTask) {
             if (lastIndent >= 2) currentTask.description.push('');
-            
-            const cbMatch = content.match(checkboxRegex);
-            if (cbMatch) {
-                currentTask.checkboxes.push({ text: cbMatch[2].trim(), checked: cbMatch[1].toLowerCase() === 'x' });
+            const cm = content.match(checkboxRegex);
+            if (cm) {
+                currentTask.checkboxes.push({ text: cm[2].trim(), checked: cm[1].toLowerCase() === 'x' });
             } else {
                 currentTask.description.push(content);
             }
             lastIndent = 1;
-            
+
         } else if (level >= 2 && currentTask) {
-            const cbMatch = content.match(checkboxRegex);
-            if (cbMatch) {
-                currentTask.checkboxes.push({ text: cbMatch[2].trim(), checked: cbMatch[1].toLowerCase() === 'x' });
+            const cm = content.match(checkboxRegex);
+            if (cm) {
+                currentTask.checkboxes.push({ text: cm[2].trim(), checked: cm[1].toLowerCase() === 'x' });
             } else {
                 currentTask.description.push('- ' + content);
             }
             lastIndent = level;
         }
     }
-    
+
     if (currentTask) tasks.push(currentTask);
     return { tasks, deckPath };
 }
 
-// ═══════════════════════════════════════════════════════════
-// WSPÓLNE FUNKCJE
-// ═══════════════════════════════════════════════════════════
+// ============================================================
+// Card content builder
+// ============================================================
 
 /**
- * Buduje content karty dla Codecks
- * Codecks bierze PIERWSZĄ LINIĘ jako tytuł!
+ * Builds the card content string for Codecks API.
+ * First line becomes the card title.
  */
 function buildCardContent(task) {
     let content = task.title;
-    
+
     if (task.description && task.description.length > 0) {
         content += '\n\n' + task.description.join('\n');
     }
-    
+
     if (task.checkboxes && task.checkboxes.length > 0) {
         content += '\n';
-        for (const checkbox of task.checkboxes) {
-            const mark = checkbox.checked ? 'x' : ' ';
-            content += `\n- [${mark}] ${checkbox.text}`;
+        for (const cb of task.checkboxes) {
+            content += `\n- [${cb.checked ? 'x' : ' '}] ${cb.text}`;
         }
     }
-    
+
     return content;
 }
 
+// ============================================================
+// Utility functions
+// ============================================================
+
 function normalizeString(str) {
-    return str
-        .toLowerCase()
-        .normalize('NFD')
+    return str.toLowerCase().normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
-        .replace(/ł/g, 'l')
-        .replace(/Ł/g, 'L')
+        .replace(/ł/g, 'l').replace(/Ł/g, 'L')
         .trim();
 }
 
 function isCommand(message) {
     if (!message || typeof message !== 'string') return false;
-    const trimmed = message.trim().toLowerCase();
-    return trimmed === '!help' || trimmed === '!commands' || trimmed === '!status' || trimmed === '!refresh';
+    const t = message.trim().toLowerCase();
+    return t === '!help' || t === '!commands' || t === '!status' || t === '!refresh';
+}
+
+function hasCreateCommand(message) {
+    return message && message.includes('[Create]');
 }
 
 function getCommandResponse(message, cacheStats = null) {
-    const trimmed = message.trim().toLowerCase();
-    
-    if (trimmed === '!commands') {
-        return `📋 *Dostępne komendy:*
+    const t = message.trim().toLowerCase();
 
-• \`!commands\` - pokazuje tę listę
-• \`!help\` - przykład użycia
-• \`!status\` - status cache mappingów
-• \`!refresh\` - odśwież cache
+    if (t === '!commands') {
+        return `📋 *Available commands:*
 
-📝 *Atrybuty:*
-• \`[Create]\` - tworzy taski w Codecks
-• \`[Deck: nazwa]\` - wybiera deck
-• \`[Deck: Space/Deck]\` - wybiera deck w konkretnym Space`;
+• \`!commands\` — show this list
+• \`!help\` — usage example
+• \`!status\` — cache status
+• \`!refresh\` — refresh cache
+
+📝 *Attributes:*
+• \`[Create]\` — create cards in Codecks
+• \`[Deck: name]\` — target deck
+• \`[Deck: Space/Deck]\` — target deck in a specific space`;
     }
-    
-    if (trimmed === '!status') {
+
+    if (t === '!status') {
         if (cacheStats) {
-            return `🔄 *Status Cache:*
+            return `🔄 *Cache Status:*
 
 • 📂 Spaces: ${cacheStats.spaces}
 • 🎴 Decks: ${cacheStats.decks}
 • 🛤️ Deck paths: ${cacheStats.deckPaths}
 • 👥 Users: ${cacheStats.users}
-• ⏰ Ostatnie odświeżenie: ${cacheStats.lastRefresh ? new Date(cacheStats.lastRefresh).toLocaleString('pl-PL') : 'nigdy'}`;
+• ⏰ Last refresh: ${cacheStats.lastRefresh ? new Date(cacheStats.lastRefresh).toISOString() : 'never'}`;
         }
-        return '⚠️ Cache nie jest zainicjalizowany';
+        return '⚠️ Cache not initialized';
     }
-    
-    if (trimmed === '!help') {
-        return `🤖 *Jak używać Codecks Bot v5.2:*
+
+    if (t === '!help') {
+        return `🤖 *Codecks Bot v5.3*
 
 \`\`\`
 [Create] [Deck: Space/Deck]
 
 Tomek:
 • Task 1
-   • Opis linia 1
+   • Description line
    • [ ] Checkbox
-      • Sub-bullet (→ "- " w Codecks)
-   • Następna linia
+      • Sub-bullet (becomes "- " in Codecks)
+   • Another line
 • Task 2
 
 Tobiasz:
 • Task 3
-   • Inny opis
+   • Description
 \`\`\`
 
-*Owner:* Tekst przed bulletami = owner tasków pod spodem
-*Poziomy wcięć:*
-• \`• tekst\` = Nowy task (tytuł)
-• \`   • tekst\` = Opis w Codecks
-• \`      • tekst\` = Bullet "- tekst" w opisie
-• \`   • [ ] tekst\` = Checkbox`;
+You can also use dashes:
+\`\`\`
+Tomek:
+- Task 1
+   - Description
+- Task 2
+\`\`\`
+
+*Owner:* plain text before bullets assigns all tasks below
+*Indent levels:*
+• \`• text\` — new card (title)
+• \`   • text\` — card description
+• \`      • text\` — "- text" sub-bullet in description
+• \`   • [ ] text\` — checkbox`;
     }
-    
+
     return null;
 }
 
-function hasCreateCommand(message) {
-    return message && message.includes('[Create]');
-}
+// ============================================================
+// Exports
+// ============================================================
 
 module.exports = {
     parseTaskMessage,

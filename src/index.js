@@ -1,10 +1,10 @@
 /**
- * Slack → Codecks Integration Bot v4.0
+ * Slack → Codecks Integration Bot v5.3
  * 
- * Dynamiczne mappingi - pobierane z API przy starcie:
- * - SPACE_MAPPING, DECK_MAPPING, USER_MAPPING to teraz tylko aliasy (skróty → pełne nazwy)
- * - Pusty mapping {} = szuka bezpośrednio po nazwie ze Slacka
- * - Cache: nazwa → UUID (pobierany z Codecks API)
+ * Dynamic mappings fetched from API at startup:
+ * - SPACE_MAPPING, DECK_MAPPING, USER_MAPPING are aliases (shortcuts → full names)
+ * - Empty mapping {} = searches directly by name
+ * - Cache: name → UUID (fetched from Codecks API)
  */
 
 require('dotenv').config();
@@ -32,7 +32,7 @@ const config = {
         ? process.env.ALLOWED_CHANNELS.split(',') 
         : configFile.allowedChannels || [],
     
-    // NOWE: Aliasy (skróty → pełne nazwy, NIE UUID!)
+    // Aliases (shortcuts → full names, not UUIDs)
     spaceMapping: process.env.SPACE_MAPPING 
         ? JSON.parse(process.env.SPACE_MAPPING) 
         : configFile.spaceMapping || {},
@@ -56,17 +56,17 @@ const codecksClient = new CodecksClient(
     process.env.CODECKS_SUBDOMAIN
 );
 
-// Deduplikacja eventów
+// Event deduplication
 const processedEvents = new Set();
 
 // Middleware do weryfikacji Slack
 app.use('/slack/events', express.raw({ type: 'application/json' }));
 
-// JSON middleware dla innych endpointów
+// JSON middleware for other endpoints
 app.use(express.json());
 
 /**
- * Weryfikuje podpis Slack
+ * Verifies Slack request signature
  */
 function verifySlackSignature(req) {
     const timestamp = req.headers['x-slack-request-timestamp'];
@@ -94,11 +94,11 @@ function verifySlackSignature(req) {
 }
 
 /**
- * Główny endpoint Slack Events API
+ * Slack Events API endpoint
  */
 app.post('/slack/events', async (req, res) => {
     if (!verifySlackSignature(req)) {
-        console.error('❌ Nieprawidłowy podpis Slack');
+        console.error('[Auth] Invalid Slack signature');
         return res.status(401).send('Unauthorized');
     }
     
@@ -106,7 +106,7 @@ app.post('/slack/events', async (req, res) => {
     
     // URL Verification
     if (payload.type === 'url_verification') {
-        console.log('✅ URL Verification OK');
+        console.log('[Slack] URL verification OK');
         return res.json({ challenge: payload.challenge });
     }
     
@@ -119,42 +119,25 @@ app.post('/slack/events', async (req, res) => {
 });
 
 /**
- * Obsługa eventu wiadomości
+ * Handles incoming message events
  */
 async function handleEvent(event) {
-    // Tylko wiadomości (nie boty, nie edycje)
-    if (event.type !== 'message' || event.subtype || event.bot_id) {
-        return;
-    }
+    if (event.type !== 'message' || event.subtype || event.bot_id) return;
     
-    // Deduplikacja
+    // Deduplication
     const eventKey = `${event.client_msg_id || event.ts}`;
-    if (processedEvents.has(eventKey)) {
-        console.log('⏭️ Event już przetworzony');
-        return;
-    }
+    if (processedEvents.has(eventKey)) return;
     processedEvents.add(eventKey);
     setTimeout(() => processedEvents.delete(eventKey), 10 * 60 * 1000);
     
-    // Filtr kanałów
+    // Channel filter
     if (config.allowedChannels && config.allowedChannels.length > 0) {
-        if (!config.allowedChannels.includes(event.channel)) {
-            return;
-        }
+        if (!config.allowedChannels.includes(event.channel)) return;
     }
     
     const messageText = event.text || '';
-    console.log('📨 Nowa wiadomość:', messageText.substring(0, 100));
     
-    // DEBUG: Pokaż surowy tekst i blocks
-    console.log('🔍 DEBUG RAW event.text:');
-    console.log(JSON.stringify(messageText));
-    if (event.blocks) {
-        console.log('🔍 DEBUG event.blocks:');
-        console.log(JSON.stringify(event.blocks, null, 2));
-    }
-    
-    // Zapisz do debugowania przez endpoint /debug-message
+    // Store for /debug-message endpoint
     lastRawEvent = {
         timestamp: new Date().toISOString(),
         text: messageText,
@@ -164,55 +147,35 @@ async function handleEvent(event) {
         charCodes: [...messageText].map(c => ({ char: c, code: c.charCodeAt(0), hex: 'U+' + c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') }))
     };
     
-    // Sprawdź czy to komenda
+    // Handle bot commands
     if (isCommand(messageText)) {
-        console.log('🤖 Komenda wykryta:', messageText.trim());
+        console.log(`[Command] ${messageText.trim()}`);
         await handleCommand(event.channel, event.ts, messageText);
         return;
     }
     
-    // Sprawdź czy zawiera [Create]
-    if (!hasCreateCommand(messageText)) {
-        console.log('ℹ️ Brak [Create] w wiadomości');
-        return;
-    }
+    if (!hasCreateCommand(messageText)) return;
     
-    // Sprawdź czy cache jest zainicjalizowany
+    // Initialize cache on first use
     if (!mappingCache.initialized) {
-        console.log('⚠️ Cache nie zainicjalizowany - próba inicjalizacji...');
         try {
             await mappingCache.initialize(codecksClient);
         } catch (error) {
-            console.error('❌ Nie można zainicjalizować cache:', error.message);
+            console.error('[Cache] Init failed:', error.message);
             await addReaction(event.channel, event.ts, { failed: [{ error: 'Cache error' }], success: [] });
             return;
         }
     }
     
-    // Parsowanie wiadomości — blocks (rich_text) mają priorytet nad text
+    // Parse message into tasks
     const { tasks, deckPath } = parseTaskMessage(messageText, event.blocks || null);
+    if (tasks.length === 0) return;
     
-    if (tasks.length === 0) {
-        console.log('ℹ️ Brak tasków w wiadomości');
-        return;
-    }
-    
-    console.log(`📋 Znaleziono ${tasks.length} task(ów)${deckPath ? ` [Deck: ${deckPath}]` : ''}`);
-    
-    // Resolvuj assignees → UUID i deck → UUID dla każdego taska
+    // Resolve deck IDs and assignees
     const tasksWithUuids = tasks.map(task => {
-        // Każdy task może mieć własny deckPath (z nowego parsera v4.1)
         const taskDeckPath = task.deckPath || deckPath;
-        let taskDeckId = null;
-        
-        if (taskDeckPath) {
-            taskDeckId = resolveDeckId(taskDeckPath);
-        }
-        
-        // Fallback do domyślnego decka
-        if (!taskDeckId) {
-            taskDeckId = config.defaultDeckId || resolveDefaultDeck();
-        }
+        let taskDeckId = taskDeckPath ? resolveDeckId(taskDeckPath) : null;
+        if (!taskDeckId) taskDeckId = config.defaultDeckId || resolveDefaultDeck();
         
         return {
             ...task,
@@ -223,49 +186,44 @@ async function handleEvent(event) {
         };
     });
     
-    // Sprawdź czy wszystkie taski mają deck
-    const tasksWithoutDeck = tasksWithUuids.filter(t => !t.deckId);
-    if (tasksWithoutDeck.length > 0) {
-        console.error(`❌ ${tasksWithoutDeck.length} task(ów) bez deck ID`);
-    }
-    
-    // Filtruj tylko taski z deckId
+    // Filter out tasks without a deck
     const validTasks = tasksWithUuids.filter(t => t.deckId);
-    
     if (validTasks.length === 0) {
-        console.error('❌ Żaden task nie ma deck ID');
+        console.error('[Event] No tasks resolved to a valid deck');
         await addReaction(event.channel, event.ts, { failed: [{ error: 'No deck' }], success: [] });
         return;
     }
     
-    // Tworzenie kart (każdy task z własnym deckId)
-    const results = await createCardsInCodecks(validTasks);
+    if (validTasks.length < tasksWithUuids.length) {
+        console.warn(`[Event] ${tasksWithUuids.length - validTasks.length} task(s) skipped — no deck ID`);
+    }
     
-    // Reakcja
+    // Create cards and react
+    const results = await createCardsInCodecks(validTasks);
     await addReaction(event.channel, event.ts, results);
 }
 
 /**
- * Resolvuje deck path do UUID
+ * Resolves deck path to UUID
  */
 function resolveDeckId(deckPath) {
     if (!deckPath) return null;
     
-    console.log(`🔍 Resolvowanie deck: "${deckPath}"`);
+    console.log(`[Deck] Resolving: ${deckPath}`);
     
     return mappingCache.resolveDeck(
         deckPath, 
-        config.deckMapping,      // Aliasy dla decków
-        config.spaceMapping      // Aliasy dla spaces (dla ścieżek space/deck)
+        config.deckMapping,
+        config.spaceMapping
     );
 }
 
 /**
- * Resolvuje domyślny deck (jeśli skonfigurowany przez nazwę)
+ * Resolves default deck (if configured by name)
  */
 function resolveDefaultDeck() {
     if (config.defaultDeckName) {
-        console.log(`🔍 Resolvowanie domyślnego decka: "${config.defaultDeckName}"`);
+        console.log(`[Deck] Resolving default: ${config.defaultDeckName}`);
         return mappingCache.resolveDeck(
             config.defaultDeckName,
             config.deckMapping,
@@ -276,25 +234,25 @@ function resolveDefaultDeck() {
 }
 
 /**
- * Obsługuje komendy !help, !commands, !status, !refresh
+ * Handles bot commands (!help, !commands, !status, !refresh)
  */
 async function handleCommand(channel, timestamp, message) {
     const trimmed = message.trim().toLowerCase();
     
-    // Specjalna obsługa !refresh
+    // Handle !refresh separately
     if (trimmed === '!refresh') {
         try {
             await mappingCache.refresh(codecksClient);
             await slackClient.chat.postMessage({
                 channel: channel,
                 thread_ts: timestamp,
-                text: '✅ Cache odświeżony!\n\n' + formatCacheStats()
+                text: '✅ Cache refreshed!\n\n' + formatCacheStats()
             });
         } catch (error) {
             await slackClient.chat.postMessage({
                 channel: channel,
                 thread_ts: timestamp,
-                text: `❌ Błąd odświeżania cache: ${error.message}`
+                text: `❌ Cache refresh failed: ${error.message}`
             });
         }
         return;
@@ -309,15 +267,15 @@ async function handleCommand(channel, timestamp, message) {
                 thread_ts: timestamp,
                 text: response
             });
-            console.log('✅ Odpowiedź na komendę wysłana');
+            
         } catch (error) {
-            console.error('❌ Błąd wysyłania odpowiedzi:', error.message);
+            console.error('[Slack] Failed to send command response:', error.message);
         }
     }
 }
 
 /**
- * Formatuje statystyki cache
+ * Formats cache stats for display
  */
 function formatCacheStats() {
     const stats = mappingCache.getStats();
@@ -325,20 +283,20 @@ function formatCacheStats() {
 }
 
 /**
- * Tworzy karty w Codecks
- * Każdy task ma własny deckId (task.deckId)
+ * Creates cards in Codecks
+
  */
 async function createCardsInCodecks(tasks) {
     const results = { success: [], failed: [] };
     
     for (const task of tasks) {
         try {
-            // Buduj pełny content (tytuł + opis + checkboxy)
+            // Build card content (title + description + checkboxes)
             const fullContent = buildCardContent(task);
             
             const cardData = {
                 content: fullContent,
-                deckId: task.deckId,  // Używaj deckId z taska
+                deckId: task.deckId,
                 assigneeId: task.assigneeId || null,
                 priority: config.defaultPriority || 'b',
                 putOnHand: task.assigneeId ? true : false
@@ -355,11 +313,11 @@ async function createCardsInCodecks(tasks) {
                 checkboxCount: task.checkboxes.length
             });
             
-            console.log(`✅ Karta: "${task.title}" → ${task.assigneeName || 'nieprzypisana'} [Deck: ${task.deckPath || 'default'}]`);
+            console.log(`[Card] Created: "${task.title}" → ${task.assigneeName || 'unassigned'} [${task.deckPath || 'default'}]`);
             
         } catch (error) {
             results.failed.push({ title: task.title, error: error.message });
-            console.error(`❌ Błąd tworzenia karty "${task.title}":`, error.message);
+            console.error(`[Card] Failed: "${task.title}" -`, error.message);
         }
     }
     
@@ -367,7 +325,7 @@ async function createCardsInCodecks(tasks) {
 }
 
 /**
- * Dodaje reakcję emoji
+ * Adds emoji reaction to the message
  */
 async function addReaction(channel, timestamp, results) {
     try {
@@ -382,7 +340,7 @@ async function addReaction(channel, timestamp, results) {
         });
         
     } catch (error) {
-        console.error('Błąd dodawania reakcji:', error.message);
+        console.error('[Slack] Failed to add reaction:', error.message);
     }
 }
 
@@ -391,11 +349,11 @@ async function addReaction(channel, timestamp, results) {
 // ============================================================
 
 /**
- * Endpoint do listowania decków z cache
+ * Lists decks from cache
  */
 app.get('/list-decks', async (req, res) => {
     try {
-        // Upewnij się że cache jest załadowany
+        // Ensure cache is loaded
         if (!mappingCache.initialized) {
             await mappingCache.initialize(codecksClient);
         }
@@ -451,7 +409,7 @@ app.get('/list-decks', async (req, res) => {
         </tr>`;
         }
         
-        // Przykład DECK_MAPPING (aliasy)
+        // Example DECK_MAPPING (aliases)
         const exampleMapping = {};
         let count = 0;
         for (const deck of decks) {
@@ -478,13 +436,13 @@ app.get('/list-decks', async (req, res) => {
         res.send(html);
         
     } catch (error) {
-        console.error('❌ Błąd pobierania decków:', error.message);
+        console.error('[API] Failed to list decks:', error.message);
         res.status(500).send(`<h1>❌ Błąd</h1><p>${error.message}</p><p><a href="/">Powrót</a></p>`);
     }
 });
 
 /**
- * Endpoint do listowania użytkowników z cache
+ * Lists users from cache
  */
 app.get('/list-users', async (req, res) => {
     try {
@@ -548,13 +506,13 @@ app.get('/list-users', async (req, res) => {
         res.send(html);
         
     } catch (error) {
-        console.error('❌ Błąd pobierania użytkowników:', error.message);
+        console.error('[API] Failed to list users:', error.message);
         res.status(500).send(`<h1>❌ Błąd</h1><p>${error.message}</p><p><a href="/">Powrót</a></p>`);
     }
 });
 
 /**
- * Endpoint do listowania spaces z cache
+ * Lists spaces from cache
  */
 app.get('/list-spaces', async (req, res) => {
     try {
@@ -607,7 +565,7 @@ app.get('/list-spaces', async (req, res) => {
         </tr>`;
         }
         
-        // Przykład SPACE_MAPPING
+        // Example SPACE_MAPPING
         const exampleMapping = {};
         for (const space of spaces.slice(0, 3)) {
             if (space.name) {
@@ -628,7 +586,7 @@ app.get('/list-spaces', async (req, res) => {
         res.send(html);
         
     } catch (error) {
-        console.error('❌ Błąd pobierania spaces:', error.message);
+        console.error('[API] Failed to list spaces:', error.message);
         res.status(500).send(`<h1>❌ Błąd</h1><p>${error.message}</p><p><a href="/">Powrót</a></p>`);
     }
 });
@@ -767,7 +725,7 @@ app.get('/debug-message', (req, res) => {
         return res.send('<html><body style="background:#1a1a2e;color:#eee;font-family:monospace;padding:20px"><h1>🔍 Debug Message</h1><p>Brak zapisanych eventów. Wyślij wiadomość na Slacku i odśwież.</p><a href="/" style="color:#00d9ff">← Powrót</a></body></html>');
     }
     
-    // Pokaż char-by-char analysis tekstu
+    // Char-by-char analysis
     let charTable = '<table border="1" cellpadding="4" style="border-collapse:collapse;font-size:12px"><tr><th>Pos</th><th>Char</th><th>Code</th><th>Hex</th><th>Name</th></tr>';
     const charNames = {
         10: 'NEWLINE (\\n)',
@@ -792,7 +750,7 @@ app.get('/debug-message', (req, res) => {
     }
     charTable += '</table>';
     
-    // Pokaż tekst z widocznymi znakami specjalnymi
+    // Visible special characters
     const visibleText = lastRawEvent.text
         .replace(/\n/g, '<span style="color:#4ade80">↵\\n</span>\n')
         .replace(/ /g, '<span style="color:#555">·</span>')
@@ -863,14 +821,14 @@ app.get('/health', (req, res) => {
 });
 
 /**
- * Endpoint do odświeżania cache (POST)
+ * Refreshes the mapping cache
  */
 app.post('/refresh-cache', async (req, res) => {
     try {
         await mappingCache.refresh(codecksClient);
         res.json({ 
             status: 'ok', 
-            message: 'Cache odświeżony',
+            message: 'Cache refreshed',
             stats: mappingCache.getStats()
         });
     } catch (error) {
@@ -970,9 +928,9 @@ USER_MAPPING = {}
 // ============================================================
 
 async function startServer() {
-    console.log('🚀 Uruchamianie Slack-Codecks Bot v4.0...');
+    console.log('[Boot] Starting Slack-Codecks Bot...');
     
-    // Test połączenia z Codecks
+    // Test Codecks connection
     const connected = await codecksClient.testConnection();
     
     if (connected) {
@@ -980,11 +938,11 @@ async function startServer() {
         try {
             await mappingCache.initialize(codecksClient);
         } catch (error) {
-            console.error('⚠️ Nie można zainicjalizować cache przy starcie:', error.message);
-            console.log('   Cache będzie zainicjalizowany przy pierwszym użyciu');
+            console.error('[Boot] Cache init failed:', error.message);
+            console.log('[Boot] Cache will init on first use');
         }
     } else {
-        console.log('⚠️ Brak połączenia z Codecks - cache będzie zainicjalizowany później');
+        console.log('[Boot] No Codecks connection, cache deferred');
     }
     
     // Start serwera
@@ -992,7 +950,7 @@ async function startServer() {
         const stats = mappingCache.getStats();
         console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║      🚀 Slack → Codecks Bot v4.0 uruchomiony!                ║
+║      🚀 Slack → Codecks Bot v5.3 started!                ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Port:            ${PORT}                                           ║
 ║  Slack Events:    /slack/events                              ║
@@ -1003,8 +961,8 @@ async function startServer() {
 ║     Decks:        ${String(stats.decks).padEnd(3)} │ Deck aliases:   ${String(Object.keys(config.deckMapping).length).padEnd(3)}       ║
 ║     Users:        ${String(stats.users).padEnd(3)} │ User aliases:   ${String(Object.keys(config.userMapping).length).padEnd(3)}       ║
 ╠══════════════════════════════════════════════════════════════╣
-║  💡 Mappingi to teraz ALIASY (skróty → pełne nazwy)          ║
-║     Pusty mapping {} = szuka bezpośrednio po nazwie          ║
+║  💡 Mappings are ALIASES (shortcuts → full names)          ║
+║     Empty mapping {} = searches by name directly          ║
 ╚══════════════════════════════════════════════════════════════╝
         `);
     });
