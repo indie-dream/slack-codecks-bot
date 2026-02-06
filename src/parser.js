@@ -109,7 +109,17 @@ function parseFromBlocks(blocks) {
 }
 
 /**
+ * Regex do rozpoznawania bullet/dash linii w plain text
+ * Matchuje: "- tekst", "  - tekst", "• tekst", "   • tekst" itp.
+ */
+const textBulletRegex = /^(\s*)([-•◦*‣])\s+(.+)$/;
+
+/**
  * Spłaszcza rich_text block do listy { text, indent, isList }
+ * 
+ * Obsługuje DWA formaty:
+ * 1. rich_text_list (Slack bullety z •) → isList=true, indent z API
+ * 2. rich_text_section z "- tekst" w plain text → parsowane jako pseudo-list
  */
 function flattenRichTextBlock(block) {
     const items = [];
@@ -118,7 +128,31 @@ function flattenRichTextBlock(block) {
     for (const element of block.elements) {
         if (element.type === 'rich_text_section') {
             const text = extractText(element.elements);
-            items.push({ text: text.trim(), indent: -1, isList: false });
+            const trimmed = text.trim();
+            
+            // Sprawdź czy to wieloliniowy tekst z dash-listą
+            // Slack może wysłać cały blok "Owner:\n- task1\n- task2" jako jeden section
+            // LUB osobne sections per linia
+            const lines = trimmed.split('\n');
+            
+            for (const line of lines) {
+                const lineTrimmed = line.trim();
+                if (!lineTrimmed) continue;
+                
+                const bulletMatch = line.match(textBulletRegex);
+                
+                if (bulletMatch) {
+                    // To jest "- tekst" lub "  - tekst" → traktuj jako list item
+                    const spaces = bulletMatch[1].length;
+                    const content = bulletMatch[3].trim();
+                    // Mapuj wcięcia: 0-1 spacji → indent 0, 2-4 → indent 1, 5+ → indent 2
+                    const indent = spaces <= 1 ? 0 : spaces <= 4 ? 1 : 2;
+                    items.push({ text: content, indent, isList: true, listStyle: 'bullet' });
+                } else {
+                    // Zwykły tekst (owner header, [Create], etc.)
+                    items.push({ text: lineTrimmed, indent: -1, isList: false });
+                }
+            }
             
         } else if (element.type === 'rich_text_list') {
             const indent = element.indent || 0;
