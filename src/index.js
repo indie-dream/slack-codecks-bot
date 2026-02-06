@@ -27,6 +27,7 @@ const config = {
     ...configFile,
     defaultDeckId: process.env.DEFAULT_DECK_ID || configFile.defaultDeckId || null,
     defaultDeckName: process.env.DEFAULT_DECK_NAME || configFile.defaultDeckName || null,
+    defaultSpaceId: process.env.DEFAULT_SPACE_ID || configFile.defaultSpaceId || null,
     allowedChannels: process.env.ALLOWED_CHANNELS 
         ? process.env.ALLOWED_CHANNELS.split(',') 
         : configFile.allowedChannels || [],

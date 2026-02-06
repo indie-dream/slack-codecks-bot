@@ -1,6 +1,7 @@
 {
   "defaultDeckId": "",
   "defaultDeckName": "",
+  "defaultSpaceId": "",
   "allowedChannels": [],
   "spaceMapping": {},
   "deckMapping": {},
